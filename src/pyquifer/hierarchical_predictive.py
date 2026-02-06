@@ -46,7 +46,9 @@ class PredictiveLevel(nn.Module):
                  input_dim: int,
                  belief_dim: int,
                  lr: float = 0.1,
-                 gen_lr: float = 0.01):
+                 gen_lr: float = 0.01,
+                 use_exact_gradients: bool = False,
+                 precision_ema: float = 0.05):
         """
         Args:
             input_dim: Dimension of input from level below
@@ -54,12 +56,19 @@ class PredictiveLevel(nn.Module):
             lr: Base learning rate for belief updates
             gen_lr: Learning rate for online generative/recognition model learning.
                    Set to 0 to disable internal learning (use external backprop only).
+            use_exact_gradients: If True, additionally run a full backward pass
+                                through the generative model for exact gradient
+                                updates (G-12, SetPCGrads-style).
+            precision_ema: EMA decay rate for precision estimation from
+                          prediction error variance (G-11).
         """
         super().__init__()
         self.input_dim = input_dim
         self.belief_dim = belief_dim
         self.lr = lr
         self.gen_lr = gen_lr
+        self.use_exact_gradients = use_exact_gradients
+        self.precision_ema = precision_ema
 
         # Beliefs (current best estimate of causes)
         self.register_buffer('beliefs', torch.zeros(belief_dim))
@@ -78,8 +87,10 @@ class PredictiveLevel(nn.Module):
             nn.Linear(belief_dim, belief_dim),
         )
 
-        # Precision per channel (learnable prior)
+        # Precision per channel (learnable prior / adaptive estimate)
         self.register_buffer('precision', torch.ones(input_dim))
+        # G-11: Running prediction error variance for adaptive precision
+        self.register_buffer('error_variance', torch.ones(input_dim))
 
     def forward(self,
                 bottom_up_input: torch.Tensor,
@@ -119,13 +130,25 @@ class PredictiveLevel(nn.Module):
         # Precision-weighted error
         weighted_error = prec * error
 
+        # G-11: Update adaptive precision from prediction error variance (EMA)
+        with torch.no_grad():
+            instant_var = error.detach().pow(2).mean(dim=0)  # per-channel variance
+            self.error_variance.mul_(1 - self.precision_ema).add_(self.precision_ema * instant_var)
+            # Precision = inverse error variance (Fisher information, Millidge et al. 2021)
+            self.precision.copy_((1.0 / (self.error_variance + 1e-6)).clamp(max=100.0))
+
         # Update beliefs via recognition model (variational approximate posterior)
         recognition_target = self.recognition(bottom_up_input).mean(dim=0)
 
         with torch.no_grad():
-            # Move beliefs toward recognition model's estimate of causes
+            # G-11: Precision-weighted belief update (natural gradient)
+            # Scale belief error by precision projected through recognition Jacobian
             belief_error = recognition_target - self.beliefs
-            self.beliefs.add_(self.lr * belief_error)
+            # Approximate precision weighting: use mean precision as scalar scaling
+            # Full Fisher requires Jacobian which is expensive; mean precision is
+            # an effective diagonal approximation
+            precision_scale = prec.mean().clamp(min=0.1, max=10.0)
+            self.beliefs.add_(self.lr * precision_scale * belief_error)
 
             # Top-down prior from level above (if available)
             if top_down_prediction is not None:
@@ -158,6 +181,19 @@ class PredictiveLevel(nn.Module):
                 for param, grad in zip(self.recognition.parameters(), rec_grads):
                     param.add_(-self.gen_lr * grad)
 
+        # G-12: Exact gradient pass through full generative graph
+        if self.use_exact_gradients and self.gen_lr > 0:
+            # Separate supervised-style update using standard backward
+            beliefs_for_exact = self.beliefs.detach().unsqueeze(0).expand(batch, -1)
+            exact_pred = self.generative(beliefs_for_exact)
+            exact_loss = (prec * (bottom_up_input.detach() - exact_pred).pow(2)).mean()
+            exact_grads = torch.autograd.grad(
+                exact_loss, self.generative.parameters(), create_graph=False
+            )
+            with torch.no_grad():
+                for param, grad in zip(self.generative.parameters(), exact_grads):
+                    param.add_(-self.gen_lr * 0.5 * grad)  # half-rate to avoid overshooting
+
         return {
             'prediction': prediction,
             'error': error,
@@ -169,6 +205,7 @@ class PredictiveLevel(nn.Module):
         """Reset beliefs to zero."""
         self.beliefs.zero_()
         self.precision.fill_(1.0)
+        self.error_variance.fill_(1.0)
 
 
 class HierarchicalPredictiveCoding(nn.Module):

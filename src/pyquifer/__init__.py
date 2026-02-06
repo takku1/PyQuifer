@@ -273,6 +273,33 @@ __all__ = [
     "VolatilityNode",
     "HierarchicalVolatilityFilter",
     "VolatilityGatedLearning",
+    # Phase 5: OU Noise (stochastic resonance)
+    "OrnsteinUhlenbeckNoise",
+    # Phase 5: Short-Term Plasticity (Tsodyks-Markram)
+    "TsodyksMarkramSynapse",
+    "STPLayer",
+    # Phase 5: Kuramoto-Daido Mean-Field
+    "KuramotoDaidoMeanField",
+    # Phase 5: Stuart-Landau Oscillator
+    "StuartLandauOscillator",
+    # Phase 5: E-prop Dual Eligibility
+    "EpropSTDP",
+    # Phase 5: Differentiable Plasticity + Learnable Eligibility
+    "DifferentiablePlasticity",
+    "LearnableEligibilityTrace",
+    # Phase 5: Speciated Neural Darwinism
+    "SpeciatedSelectionArena",
+    # Phase 5: AdEx Neuron
+    "AdExNeuron",
+    # Phase 5: Koopman Bifurcation Detection
+    "KoopmanBifurcationDetector",
+    # Phase 5: Wilson-Cowan Neural Mass
+    "WilsonCowanPopulation",
+    "WilsonCowanNetwork",
+    # Phase 6: New spiking primitives
+    "SpikeEncoder",
+    "SpikeDecoder",
+    "SynapticDelay",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -579,6 +606,44 @@ _LAZY_IMPORTS = {
     "HierarchicalVolatilityFilter": (".volatility_filter", "HierarchicalVolatilityFilter"),
     "VolatilityGatedLearning": (".volatility_filter", "VolatilityGatedLearning"),
     "ModulationState": (".bridge", "ModulationState"),
+
+    # Phase 5: OU Noise
+    "OrnsteinUhlenbeckNoise": (".stochastic_resonance", "OrnsteinUhlenbeckNoise"),
+
+    # Phase 5: Short-Term Plasticity
+    "TsodyksMarkramSynapse": (".short_term_plasticity", "TsodyksMarkramSynapse"),
+    "STPLayer": (".short_term_plasticity", "STPLayer"),
+
+    # Phase 5: Kuramoto-Daido Mean-Field
+    "KuramotoDaidoMeanField": (".oscillators", "KuramotoDaidoMeanField"),
+
+    # Phase 5: Stuart-Landau Oscillator
+    "StuartLandauOscillator": (".oscillators", "StuartLandauOscillator"),
+
+    # Phase 5: E-prop Dual Eligibility
+    "EpropSTDP": (".advanced_spiking", "EpropSTDP"),
+
+    # Phase 5: Differentiable Plasticity + Learnable Eligibility
+    "DifferentiablePlasticity": (".learning", "DifferentiablePlasticity"),
+    "LearnableEligibilityTrace": (".learning", "LearnableEligibilityTrace"),
+
+    # Phase 5: Speciated Neural Darwinism
+    "SpeciatedSelectionArena": (".neural_darwinism", "SpeciatedSelectionArena"),
+
+    # Phase 5: AdEx Neuron
+    "AdExNeuron": (".spiking", "AdExNeuron"),
+
+    # Phase 5: Koopman Bifurcation Detection
+    "KoopmanBifurcationDetector": (".criticality", "KoopmanBifurcationDetector"),
+
+    # Phase 5: Wilson-Cowan Neural Mass
+    "WilsonCowanPopulation": (".neural_mass", "WilsonCowanPopulation"),
+    "WilsonCowanNetwork": (".neural_mass", "WilsonCowanNetwork"),
+
+    # Phase 6: New spiking primitives
+    "SpikeEncoder": (".spiking", "SpikeEncoder"),
+    "SpikeDecoder": (".spiking", "SpikeDecoder"),
+    "SynapticDelay": (".spiking", "SynapticDelay"),
 }
 
 # Cache for loaded attributes

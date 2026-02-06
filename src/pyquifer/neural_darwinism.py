@@ -421,6 +421,234 @@ class SymbiogenesisDetector(nn.Module):
         self.hist_ptr.zero_()
 
 
+class SpeciatedSelectionArena(nn.Module):
+    """
+    Selection arena with speciation, fitness sharing, and stagnation detection.
+
+    Extends SelectionArena with biological speciation mechanisms:
+    1. Groups are clustered into species by weight similarity
+    2. Fitness is shared within species (prevents single-species dominance)
+    3. Stagnant species (no improvement for N steps) are eliminated
+
+    Same interface as SelectionArena for drop-in replacement.
+
+    Args:
+        num_groups: Number of competing groups
+        group_dim: Dimension of each group
+        total_budget: Total resource budget
+        selection_pressure: How strongly fitness affects resources
+        atrophy_rate: How fast low-fitness groups lose resources
+        compatibility_threshold: Distance threshold for same-species
+        stagnation_limit: Steps without improvement before species elimination
+    """
+
+    def __init__(self,
+                 num_groups: int,
+                 group_dim: int,
+                 total_budget: float = 10.0,
+                 selection_pressure: float = 0.1,
+                 atrophy_rate: float = 0.01,
+                 compatibility_threshold: float = 0.5,
+                 stagnation_limit: int = 50):
+        super().__init__()
+        self.num_groups = num_groups
+        self.group_dim = group_dim
+        self.total_budget = total_budget
+        self.selection_pressure = selection_pressure
+        self.atrophy_rate = atrophy_rate
+        self.compatibility_threshold = compatibility_threshold
+        self.stagnation_limit = stagnation_limit
+
+        # Groups (same as SelectionArena)
+        self.groups = nn.ModuleList([
+            NeuronalGroup(group_dim, group_id=i)
+            for i in range(num_groups)
+        ])
+
+        # Reentrant connections
+        self.reentrant = nn.Linear(group_dim * num_groups, group_dim * num_groups)
+
+        # Species tracking
+        self.register_buffer('species_ids', torch.zeros(num_groups, dtype=torch.long))
+        self.register_buffer('species_best_fitness', torch.zeros(num_groups))
+        self.register_buffer('species_stagnation', torch.zeros(num_groups, dtype=torch.long))
+        self.register_buffer('step_count', torch.tensor(0))
+
+    def _compute_distance(self, group_i: NeuronalGroup, group_j: NeuronalGroup) -> float:
+        """Cosine distance between group weight vectors."""
+        w_i = torch.cat([p.flatten() for p in group_i.network.parameters()])
+        w_j = torch.cat([p.flatten() for p in group_j.network.parameters()])
+
+        cos_sim = torch.nn.functional.cosine_similarity(
+            w_i.unsqueeze(0), w_j.unsqueeze(0)
+        )
+        return (1.0 - cos_sim.item())  # distance = 1 - similarity
+
+    def _assign_species(self):
+        """Cluster groups into species by compatibility threshold."""
+        # Representative: first member of each species
+        representatives = {}  # species_id -> group_index
+
+        with torch.no_grad():
+            for i, group in enumerate(self.groups):
+                assigned = False
+                for sp_id, rep_idx in representatives.items():
+                    dist = self._compute_distance(group, self.groups[rep_idx])
+                    if dist < self.compatibility_threshold:
+                        self.species_ids[i] = sp_id
+                        assigned = True
+                        break
+                if not assigned:
+                    new_id = max(representatives.keys(), default=-1) + 1
+                    representatives[new_id] = i
+                    self.species_ids[i] = new_id
+
+    def _fitness_sharing(self, raw_fitnesses: torch.Tensor) -> torch.Tensor:
+        """Adjust fitness by species size: adjusted = raw / species_size."""
+        adjusted = raw_fitnesses.clone()
+        for sp_id in self.species_ids.unique():
+            mask = self.species_ids == sp_id
+            species_size = mask.sum().float()
+            adjusted[mask] = adjusted[mask] / species_size
+        return adjusted
+
+    def _stagnation_check(self, fitnesses: torch.Tensor):
+        """Eliminate species with no improvement for stagnation_limit steps."""
+        with torch.no_grad():
+            for sp_id in self.species_ids.unique():
+                mask = self.species_ids == sp_id
+                species_max_fitness = fitnesses[mask].max()
+
+                if species_max_fitness > self.species_best_fitness[sp_id]:
+                    self.species_best_fitness[sp_id] = species_max_fitness
+                    self.species_stagnation[sp_id] = 0
+                else:
+                    self.species_stagnation[sp_id] += 1
+
+                # Eliminate stagnant species (reduce resources drastically)
+                if self.species_stagnation[sp_id] > self.stagnation_limit:
+                    for i, group in enumerate(self.groups):
+                        if self.species_ids[i] == sp_id:
+                            group.resources.mul_(0.1)
+                    # Reset stagnation counter
+                    self.species_stagnation[sp_id] = 0
+                    self.species_best_fitness[sp_id] = 0.0
+
+    def compute_fitness(self,
+                        group_outputs: List[torch.Tensor],
+                        global_coherence: torch.Tensor) -> torch.Tensor:
+        """Compute fitness for each group (same as SelectionArena)."""
+        fitnesses = torch.zeros(self.num_groups)
+        for i, output in enumerate(group_outputs):
+            if output.dim() > 1:
+                output = output.mean(dim=0)
+            cos_sim = torch.nn.functional.cosine_similarity(
+                output.unsqueeze(0), global_coherence.unsqueeze(0)
+            )
+            fitnesses[i] = cos_sim.item()
+        fitnesses = (fitnesses + 1) / 2
+        return fitnesses
+
+    def selection_step(self, fitnesses: torch.Tensor):
+        """Apply speciated selection with fitness sharing."""
+        # Re-assign species periodically
+        if self.step_count % 10 == 0:
+            self._assign_species()
+
+        # Fitness sharing
+        adjusted = self._fitness_sharing(fitnesses)
+
+        # Stagnation check
+        self._stagnation_check(fitnesses)
+
+        # Replicator dynamics on adjusted fitness
+        mean_fitness = adjusted.mean()
+        with torch.no_grad():
+            for i, group in enumerate(self.groups):
+                advantage = adjusted[i] - mean_fitness
+                resource_delta = group.resources * advantage * self.selection_pressure
+                atrophy = -self.atrophy_rate * group.resources
+                group.resources.add_(resource_delta + atrophy)
+                group.resources.clamp_(min=0.01)
+                group.fitness.copy_(fitnesses[i])
+
+            # Normalize to budget
+            total = sum(g.resources.item() for g in self.groups)
+            if total > 0:
+                scale = self.total_budget / total
+                for group in self.groups:
+                    group.resources.mul_(scale)
+                    group.activation_level.copy_(
+                        group.resources / self.total_budget * self.num_groups
+                    )
+
+    def forward(self,
+                input: torch.Tensor,
+                global_coherence: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Process input through speciated groups (same API as SelectionArena)."""
+        group_results = []
+        group_outputs = []
+        for group in self.groups:
+            result = group(input)
+            group_results.append(result)
+            group_outputs.append(result['output'])
+
+        # Reentrant connections
+        stacked = torch.cat(group_outputs, dim=-1)
+        reentrant_signal = self.reentrant(stacked)
+        reentrant_parts = reentrant_signal.split(self.group_dim, dim=-1)
+
+        for i in range(self.num_groups):
+            group_outputs[i] = group_outputs[i] + 0.1 * reentrant_parts[i]
+
+        # Combined output
+        combined = torch.stack(group_outputs, dim=0)
+        weights = torch.tensor([g.activation_level.item() for g in self.groups],
+                               device=input.device)
+        weights = weights / (weights.sum() + 1e-8)
+
+        if combined.dim() == 2:
+            output = (combined * weights.unsqueeze(1)).sum(dim=0)
+        else:
+            output = (combined * weights.view(-1, 1, 1)).sum(dim=0)
+
+        if global_coherence is None:
+            global_coherence = output.detach()
+            if global_coherence.dim() > 1:
+                global_coherence = global_coherence.mean(dim=0)
+
+        fitnesses = self.compute_fitness(group_outputs, global_coherence)
+        self.selection_step(fitnesses)
+
+        with torch.no_grad():
+            self.step_count.add_(1)
+
+        resources = torch.tensor([g.resources.item() for g in self.groups])
+
+        return {
+            'output': output,
+            'group_outputs': group_outputs,
+            'fitnesses': fitnesses,
+            'resources': resources,
+            'mean_fitness': fitnesses.mean(),
+            'fitness_variance': fitnesses.var(),
+            'species_ids': self.species_ids.clone(),
+            'num_species': self.species_ids.unique().numel(),
+        }
+
+    def reset(self):
+        """Reset all groups and species tracking."""
+        per_group = self.total_budget / self.num_groups
+        for group in self.groups:
+            group.resources.fill_(per_group)
+            group.activation_level.fill_(1.0)
+            group.fitness.fill_(0.5)
+        self.species_ids.zero_()
+        self.species_best_fitness.zero_()
+        self.species_stagnation.zero_()
+        self.step_count.zero_()
+
+
 if __name__ == '__main__':
     from typing import Tuple
 

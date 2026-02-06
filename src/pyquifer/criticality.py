@@ -169,13 +169,16 @@ class BranchingRatio(nn.Module):
     Critical systems have sigma very close to 1.
     """
 
-    def __init__(self, window_size: int = 50):
+    def __init__(self, window_size: int = 50, variance_threshold: float = 1e-6):
         """
         Args:
             window_size: Number of time steps to average over
+            variance_threshold: If activity variance falls below this, return
+                               sigma=1.0 with converged=True (quiescent regime)
         """
         super().__init__()
         self.window_size = window_size
+        self.variance_threshold = variance_threshold
 
         self.register_buffer('activity_history', torch.zeros(window_size))
         self.register_buffer('history_ptr', torch.tensor(0))
@@ -209,6 +212,15 @@ class BranchingRatio(nn.Module):
 
         history = self.activity_history[:n_valid]
 
+        # G-19: Variance check — if activity is near-constant, ratio is unstable
+        activity_var = history.var()
+        if activity_var.item() < self.variance_threshold:
+            return {
+                'branching_ratio': torch.tensor(1.0),
+                'criticality_distance': torch.tensor(0.0),
+                'converged': True,
+            }
+
         # Branching ratio = mean of per-step ratios (unbiased by Jensen's inequality)
         ancestors = history[:-1]
         descendants = history[1:]
@@ -218,7 +230,8 @@ class BranchingRatio(nn.Module):
 
         return {
             'branching_ratio': sigma,
-            'criticality_distance': torch.abs(sigma - 1.0)
+            'criticality_distance': torch.abs(sigma - 1.0),
+            'converged': False,
         }
 
     def reset(self):
@@ -442,6 +455,202 @@ class HomeostaticRegulator(nn.Module):
         self.running_activity.fill_(self.target_activity)
         self.scaling.data.fill_(1.0)
         self.threshold_offset.data.fill_(0.0)
+
+
+class KoopmanBifurcationDetector(nn.Module):
+    """
+    Bifurcation detection via Dynamic Mode Decomposition (DMD) eigenvalues.
+
+    Uses time-delay (Hankel) embedding of state history, then performs
+    DMD via SVD to extract dynamic modes. Eigenvalue magnitudes track
+    stability: |lambda| approaching 1.0 indicates approaching bifurcation.
+
+    This is a spectral complement to the branching ratio — works on
+    continuous dynamics rather than discrete avalanches.
+
+    Args:
+        state_dim: Dimension of the state being monitored
+        buffer_size: Number of time steps to store
+        delay_dim: Number of delay embeddings (Hankel matrix rows)
+        rank: SVD truncation rank for DMD
+        compute_every: Only recompute eigenvalues every N steps
+    """
+
+    def __init__(self,
+                 state_dim: int,
+                 buffer_size: int = 200,
+                 delay_dim: int = 10,
+                 rank: int = 5,
+                 compute_every: int = 10,
+                 bootstrap_n: int = 20,
+                 min_confidence: int = 1):
+        """
+        Args:
+            state_dim: Dimension of the state being monitored
+            buffer_size: Number of time steps to store
+            delay_dim: Number of delay embeddings (Hankel matrix rows)
+            rank: SVD truncation rank for DMD
+            compute_every: Only recompute eigenvalues every N steps
+            bootstrap_n: Number of bootstrap subsamples for confidence (BOP-DMD, Sashidhar & Kutz 2022)
+            min_confidence: Require N consecutive triggers before reporting bifurcation
+        """
+        super().__init__()
+        self.state_dim = state_dim
+        self.buffer_size = buffer_size
+        self.delay_dim = delay_dim
+        self.rank = rank
+        self.compute_every = compute_every
+        self.bootstrap_n = bootstrap_n
+        self.min_confidence = min_confidence
+
+        # State history
+        self.register_buffer('history', torch.zeros(buffer_size, state_dim))
+        self.register_buffer('hist_ptr', torch.tensor(0))
+
+        # Cached results
+        self.register_buffer('stability_margin', torch.tensor(1.0))
+        self.register_buffer('stability_margin_std', torch.tensor(0.0))
+        self.register_buffer('max_eigenvalue_mag', torch.tensor(0.0))
+        self.register_buffer('approaching_bifurcation', torch.tensor(False))
+        self.register_buffer('consecutive_triggers', torch.tensor(0))
+
+    def _build_hankel(self) -> Optional[torch.Tensor]:
+        """
+        Build time-delay (Hankel) embedding matrix.
+
+        Returns:
+            Hankel matrix (delay_dim * state_dim, num_windows) or None if insufficient data
+        """
+        n_valid = min(self.hist_ptr.item(), self.buffer_size)
+        n_windows = n_valid - self.delay_dim
+
+        if n_windows < self.delay_dim:
+            return None
+
+        # Build Hankel matrix: each column is a delay-embedded snapshot
+        rows = []
+        for d in range(self.delay_dim):
+            rows.append(self.history[d:d + n_windows])
+
+        # (delay_dim, n_windows, state_dim) -> (delay_dim * state_dim, n_windows)
+        H = torch.cat(rows, dim=1).T  # (delay_dim * state_dim, n_windows)
+        return H
+
+    def _dmd(self, H: torch.Tensor) -> torch.Tensor:
+        """
+        Dynamic Mode Decomposition via SVD.
+
+        Returns eigenvalue magnitudes of the linear dynamics operator.
+        """
+        # Split into X (t) and Y (t+1)
+        X = H[:, :-1]
+        Y = H[:, 1:]
+
+        # SVD of X
+        try:
+            U, S, Vh = torch.linalg.svd(X, full_matrices=False)
+        except RuntimeError:
+            return torch.tensor([0.0])
+
+        # Truncate to rank
+        r = min(self.rank, len(S), U.shape[1])
+        if r == 0:
+            return torch.tensor([0.0])
+
+        U_r = U[:, :r]
+        S_r = S[:r]
+        Vh_r = Vh[:r, :]
+
+        # DMD operator: A_tilde = U_r^T Y V_r S_r^{-1}
+        S_inv = 1.0 / (S_r + 1e-8)
+        A_tilde = U_r.T @ Y @ Vh_r.T @ torch.diag(S_inv)
+
+        # Eigenvalues of A_tilde
+        try:
+            eigenvalues = torch.linalg.eigvals(A_tilde)
+        except RuntimeError:
+            return torch.tensor([0.0])
+
+        return torch.abs(eigenvalues)
+
+    def forward(self, state: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Record state and detect approaching bifurcation.
+
+        Args:
+            state: Current system state (state_dim,) or flattened
+
+        Returns:
+            Dict with:
+            - stability_margin: 1 - max(|eigenvalue|). Approaching 0 = nearing bifurcation
+            - max_eigenvalue_mag: Maximum eigenvalue magnitude
+            - approaching_bifurcation: Whether margin is below threshold
+        """
+        if state.dim() > 1:
+            state = state.flatten()[:self.state_dim]
+
+        # Store in history
+        with torch.no_grad():
+            idx = self.hist_ptr % self.buffer_size
+            self.history[idx] = state.detach()
+            self.hist_ptr.add_(1)
+
+        # Only recompute periodically (DMD is expensive)
+        if self.hist_ptr % self.compute_every == 0:
+            H = self._build_hankel()
+            if H is not None:
+                # Bootstrap confidence (BOP-DMD, Sashidhar & Kutz 2022)
+                max_mags = []
+                n_cols = H.shape[1]
+                for _ in range(self.bootstrap_n):
+                    # Subsample 80% of columns
+                    n_sub = max(3, int(0.8 * n_cols))
+                    idx = torch.randperm(n_cols)[:n_sub]
+                    H_sub = H[:, idx.sort().values]
+                    eig_mags = self._dmd(H_sub)
+                    if len(eig_mags) > 0:
+                        max_mags.append(eig_mags.max().item())
+
+                if len(max_mags) >= 3:
+                    max_mags_t = torch.tensor(max_mags)
+                    mean_mag = max_mags_t.mean()
+                    std_mag = max_mags_t.std()
+
+                    with torch.no_grad():
+                        self.max_eigenvalue_mag.copy_(mean_mag.clamp(max=5.0))
+                        self.stability_margin.copy_((1.0 - mean_mag).clamp(min=-1.0))
+                        self.stability_margin_std.copy_(std_mag)
+
+                        # Trigger when margin < 0.1 AND bootstrap std is not too large
+                        # (high std means unreliable estimate — don't trigger)
+                        margin = (1.0 - mean_mag).item()
+                        reliable = std_mag.item() < 0.3  # reject high-variance estimates
+                        raw_trigger = margin < 0.1 and reliable
+                        if raw_trigger:
+                            self.consecutive_triggers.add_(1)
+                        else:
+                            self.consecutive_triggers.zero_()
+
+                        self.approaching_bifurcation.fill_(
+                            self.consecutive_triggers.item() >= self.min_confidence
+                        )
+
+        return {
+            'stability_margin': self.stability_margin.clone(),
+            'stability_margin_std': self.stability_margin_std.clone(),
+            'max_eigenvalue_mag': self.max_eigenvalue_mag.clone(),
+            'approaching_bifurcation': self.approaching_bifurcation.clone(),
+        }
+
+    def reset(self):
+        """Reset history and cached results."""
+        self.history.zero_()
+        self.hist_ptr.zero_()
+        self.stability_margin.fill_(1.0)
+        self.stability_margin_std.fill_(0.0)
+        self.max_eigenvalue_mag.fill_(0.0)
+        self.approaching_bifurcation.fill_(False)
+        self.consecutive_triggers.zero_()
 
 
 if __name__ == '__main__':

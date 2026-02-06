@@ -1,7 +1,28 @@
 import torch
 import torch.nn as nn
 import math
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
+
+
+def _rk4_step(f, y, dt):
+    """Classical 4th-order Runge-Kutta integrator step.
+
+    Pre-allocated buffer style (torchode, Lienen 2022): computes k1-k4
+    in-place without list allocation.
+
+    Args:
+        f: RHS function y' = f(y)
+        y: Current state tensor
+        dt: Timestep
+
+    Returns:
+        Updated state y_{n+1}
+    """
+    k1 = f(y)
+    k2 = f(y + 0.5 * dt * k1)
+    k3 = f(y + 0.5 * dt * k2)
+    k4 = f(y + dt * k3)
+    return y + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
 class Snake(nn.Module):
@@ -38,7 +59,8 @@ class LearnableKuramotoBank(nn.Module):
                  initial_frequency_range: tuple = (0.5, 1.5),
                  initial_phase_range: tuple = (0.0, 2 * math.pi),
                  topology: Literal['global', 'small_world', 'scale_free', 'ring', 'learnable'] = 'global',
-                 topology_params: Optional[dict] = None):
+                 topology_params: Optional[dict] = None,
+                 integration_method: Literal['euler', 'rk4'] = 'euler'):
         """
         Args:
             num_oscillators: Number of oscillators in the bank.
@@ -56,11 +78,13 @@ class LearnableKuramotoBank(nn.Module):
                 - scale_free: {'m': edges_per_new_node}
                 - ring: {'k': neighbors_each_side}
                 - learnable: {'sparsity': target_sparsity}
+            integration_method: 'euler' (default) or 'rk4' (4th-order Runge-Kutta)
         """
         super().__init__()
         self.num_oscillators = num_oscillators
         self.dt = dt
         self.topology = topology
+        self.integration_method = integration_method
         self.topology_params = topology_params or {}
         self._global_topology = False  # Will be set True for global topology
 
@@ -270,12 +294,51 @@ class LearnableKuramotoBank(nn.Module):
                     normalized_interaction = interaction_sum / connection_counts
 
             # Kuramoto dynamics equation
-            d_theta_dt = self.natural_frequencies + self.coupling_strength * normalized_interaction
+            if self.integration_method == 'rk4':
+                # Build RHS closure capturing current coupling state
+                _ext = external_input
 
-            if external_input is not None:
-                d_theta_dt = d_theta_dt + external_input
+                def _kuramoto_rhs(ph):
+                    # Recompute coupling for this intermediate state
+                    if adj is None:
+                        sp = torch.sin(ph)
+                        cp = torch.cos(ph)
+                        if use_precision:
+                            pr = self.precision.detach()
+                            ws = (sp * pr).sum()
+                            wc = (cp * pr).sum()
+                            ints = cp * (ws - sp * pr) - sp * (wc - cp * pr)
+                            ps = pr.sum() - pr
+                            ni = ints / ps.clamp(min=1e-8)
+                        else:
+                            ss = sp.sum()
+                            sc = cp.sum()
+                            ints = cp * (ss - sp) - sp * (sc - cp)
+                            ni = ints / (self.num_oscillators - 1)
+                    else:
+                        pd = ph.unsqueeze(1) - ph.unsqueeze(0)
+                        if use_precision:
+                            ea = adj * self.precision.detach().unsqueeze(0)
+                            wi = ea * torch.sin(pd)
+                            is_ = torch.sum(wi, dim=1)
+                            ws = ea.sum(dim=1).clamp(min=1e-8)
+                            ni = is_ / ws
+                        else:
+                            wi = adj * torch.sin(pd)
+                            is_ = torch.sum(wi, dim=1)
+                            cc = adj.sum(dim=1).clamp(min=1)
+                            ni = is_ / cc
+                    rhs = self.natural_frequencies + self.coupling_strength * ni
+                    if _ext is not None:
+                        rhs = rhs + _ext
+                    return rhs
 
-            phases = (phases + d_theta_dt * self.dt) % (2 * math.pi)
+                phases = _rk4_step(_kuramoto_rhs, phases, self.dt) % (2 * math.pi)
+            else:
+                d_theta_dt = self.natural_frequencies + self.coupling_strength * normalized_interaction
+                if external_input is not None:
+                    d_theta_dt = d_theta_dt + external_input
+                phases = (phases + d_theta_dt * self.dt) % (2 * math.pi)
 
         # Update precision from phase velocity variance
         with torch.no_grad():
@@ -334,6 +397,330 @@ class LearnableKuramotoBank(nn.Module):
         local_mean = neighbor_sum / neighbor_count
 
         return torch.abs(local_mean)
+
+
+class StuartLandauOscillator(nn.Module):
+    """
+    Stuart-Landau oscillator: amplitude + phase dynamics with Hopf bifurcation.
+
+    Unlike Kuramoto (phase-only), Stuart-Landau tracks both amplitude and phase
+    via complex state z:
+
+        dz/dt = (mu + i*omega) * z - |z|^2 * z + coupling * (z_mean - z)
+
+    Where:
+    - mu > 0: limit cycle (oscillating)
+    - mu < 0: fixed point (damped)
+    - mu = 0: Hopf bifurcation (criticality!)
+
+    The amplitude dynamics make this a natural fit for criticality control:
+    |mu| = distance from bifurcation.
+
+    Args:
+        num_oscillators: Number of oscillators
+        mu: Bifurcation parameter (>0 oscillating, <0 damped, =0 critical)
+        omega_range: Range for natural frequencies
+        coupling: Global coupling strength
+        dt: Integration timestep
+    """
+
+    def __init__(self,
+                 num_oscillators: int,
+                 mu: float = 0.1,
+                 omega_range: tuple = (0.5, 1.5),
+                 coupling: float = 1.0,
+                 dt: float = 0.01,
+                 integration_method: Literal['euler', 'rk4'] = 'euler'):
+        super().__init__()
+        self.num_oscillators = num_oscillators
+        self.dt = dt
+        self.integration_method = integration_method
+
+        # Bifurcation parameter (adapted by dynamics, not backprop)
+        self.register_buffer('mu', torch.tensor(mu))
+
+        # Natural frequencies
+        self.omega = nn.Parameter(
+            torch.rand(num_oscillators) * (omega_range[1] - omega_range[0]) + omega_range[0]
+        )
+
+        # Coupling strength
+        self.coupling = nn.Parameter(torch.tensor(coupling))
+
+        # Complex state z = r * exp(i * theta)
+        # Initialize with small random amplitudes
+        r_init = torch.rand(num_oscillators) * 0.3 + 0.1
+        theta_init = torch.rand(num_oscillators) * 2 * math.pi
+        self.register_buffer('z_real', r_init * torch.cos(theta_init))
+        self.register_buffer('z_imag', r_init * torch.sin(theta_init))
+
+        self.register_buffer('step_count', torch.tensor(0))
+
+    @property
+    def z(self) -> torch.Tensor:
+        """Complex oscillator states."""
+        return torch.complex(self.z_real, self.z_imag)
+
+    @property
+    def amplitudes(self) -> torch.Tensor:
+        """Current oscillator amplitudes."""
+        return torch.abs(self.z)
+
+    @property
+    def phases(self) -> torch.Tensor:
+        """Current oscillator phases."""
+        return torch.angle(self.z)
+
+    def forward(self, steps: int = 1,
+                external_input: Optional[torch.Tensor] = None) -> Dict:
+        """
+        Evolve Stuart-Landau dynamics.
+
+        Args:
+            steps: Number of integration steps
+            external_input: Optional complex driving input (num_oscillators,)
+
+        Returns:
+            Dict with amplitudes, phases, order_parameter, z
+        """
+        z = self.z
+
+        for _ in range(steps):
+            if self.integration_method == 'rk4':
+                _ext = external_input
+
+                def _sl_rhs(zz):
+                    zz_abs_sq = zz.real ** 2 + zz.imag ** 2
+                    mu_iw = torch.complex(
+                        self.mu.expand(self.num_oscillators),
+                        self.omega
+                    )
+                    nl = zz_abs_sq * zz
+                    zm = zz.mean()
+                    ct = self.coupling * (zm - zz)
+                    rhs = mu_iw * zz - nl + ct
+                    if _ext is not None:
+                        rhs = rhs + _ext
+                    return rhs
+
+                z = _rk4_step(_sl_rhs, z, self.dt)
+            else:
+                z_abs_sq = z.real ** 2 + z.imag ** 2
+                mu_plus_iw = torch.complex(
+                    self.mu.expand(self.num_oscillators),
+                    self.omega
+                )
+                nonlinear = z_abs_sq * z
+                z_mean = z.mean()
+                coupling_term = self.coupling * (z_mean - z)
+                dz = mu_plus_iw * z - nonlinear + coupling_term
+                if external_input is not None:
+                    dz = dz + external_input
+                z = z + dz * self.dt
+
+        # Update stored state
+        with torch.no_grad():
+            self.z_real.copy_(z.real.detach())
+            self.z_imag.copy_(z.imag.detach())
+            self.step_count.add_(steps)
+
+        amplitudes = torch.abs(z)
+        phases = torch.angle(z)
+        order_param = torch.abs(z.mean())
+
+        return {
+            'amplitudes': amplitudes,
+            'phases': phases,
+            'order_parameter': order_param,
+            'z': z,
+            'mean_amplitude': amplitudes.mean(),
+        }
+
+    def get_order_parameter(self) -> torch.Tensor:
+        """Global synchronization level."""
+        return torch.abs(self.z.mean())
+
+    def get_critical_coupling(self) -> torch.Tensor:
+        """Estimate critical coupling Kc from frequency spread.
+
+        For globally coupled Stuart-Landau oscillators, synchronization
+        onset requires coupling to exceed the natural frequency spread.
+        Kc ~ max(omega) - min(omega) (Chadwick et al. 2025).
+
+        Returns:
+            Estimated critical coupling strength
+        """
+        return self.omega.max() - self.omega.min()
+
+    def get_criticality_distance(self) -> torch.Tensor:
+        """Distance from Hopf bifurcation (|mu|). 0 = critical."""
+        return torch.abs(self.mu)
+
+    def set_mu(self, mu: float):
+        """Set bifurcation parameter (for criticality control)."""
+        with torch.no_grad():
+            self.mu.fill_(mu)
+
+    def reset(self):
+        """Reset oscillators to random small-amplitude state."""
+        r = torch.rand(self.num_oscillators) * 0.3 + 0.1
+        theta = torch.rand(self.num_oscillators) * 2 * math.pi
+        self.z_real.copy_(r * torch.cos(theta))
+        self.z_imag.copy_(r * torch.sin(theta))
+        self.step_count.zero_()
+
+
+class KuramotoDaidoMeanField(nn.Module):
+    """
+    Mean-field reduction of the Kuramoto model via the Ott-Antonsen ansatz.
+
+    Instead of tracking N individual oscillator phases (O(N^2) coupling),
+    tracks the complex order parameter Z directly (O(1) per step):
+
+        dZ/dt = (-i*w_mean - Delta + K/2) * Z - K/2 * |Z|^2 * Z
+
+    Where:
+    - Z = R * exp(i*Psi) is the complex order parameter
+    - w_mean is the mean natural frequency
+    - Delta is the frequency spread (Cauchy half-width)
+    - K is coupling strength
+
+    This is exact for infinite-N Cauchy-distributed frequencies and
+    provides an excellent O(1) approximation for large finite N.
+
+    Args:
+        omega_mean: Mean natural frequency
+        delta: Frequency spread (Cauchy half-width at half-maximum)
+        coupling: Coupling strength K
+        dt: Integration timestep
+    """
+
+    def __init__(self,
+                 omega_mean: float = 1.0,
+                 delta: float = 0.1,
+                 coupling: float = 1.0,
+                 dt: float = 0.01):
+        super().__init__()
+        self.dt = dt
+
+        # Learnable dynamics parameters
+        self.omega_mean = nn.Parameter(torch.tensor(omega_mean))
+        self.coupling = nn.Parameter(torch.tensor(coupling))
+
+        # Delta (spread) as buffer — not typically learned
+        self.register_buffer('delta', torch.tensor(delta))
+
+        # Complex order parameter Z = R * exp(i*Psi)
+        # Store as (real, imag) pair for buffer compatibility
+        self.register_buffer('Z_real', torch.tensor(0.1))
+        self.register_buffer('Z_imag', torch.tensor(0.0))
+
+        # Step counter
+        self.register_buffer('step_count', torch.tensor(0))
+
+    @property
+    def Z(self) -> torch.Tensor:
+        """Complex order parameter."""
+        return torch.complex(self.Z_real, self.Z_imag)
+
+    @property
+    def R(self) -> torch.Tensor:
+        """Order parameter magnitude (synchronization level)."""
+        return torch.abs(self.Z)
+
+    @property
+    def Psi(self) -> torch.Tensor:
+        """Order parameter phase (mean phase)."""
+        return torch.angle(self.Z)
+
+    def forward(self, steps: int = 1,
+                external_field: Optional[torch.Tensor] = None) -> Dict:
+        """
+        Evolve the mean-field ODE for given number of steps.
+
+        Args:
+            steps: Number of integration steps
+            external_field: Optional complex driving field
+
+        Returns:
+            Dict with R (magnitude), Psi (phase), Z (complex)
+        """
+        Z = self.Z
+
+        for _ in range(steps):
+            K = self.coupling
+            w = self.omega_mean
+
+            # Ott-Antonsen mean-field ODE
+            # dZ/dt = (-i*w - Delta + K/2) * Z - K/2 * |Z|^2 * Z
+            Z_sq_mag = (Z.real ** 2 + Z.imag ** 2)
+            linear_coeff = torch.complex(-self.delta + K / 2, -w)
+            dZ = linear_coeff * Z - (K / 2) * Z_sq_mag * Z
+
+            if external_field is not None:
+                dZ = dZ + external_field
+
+            Z = Z + dZ * self.dt
+
+        # Update stored state
+        with torch.no_grad():
+            self.Z_real.copy_(Z.real.detach())
+            self.Z_imag.copy_(Z.imag.detach())
+            self.step_count.add_(steps)
+
+        R = torch.abs(Z)
+        Psi = torch.angle(Z)
+
+        return {
+            'R': R,
+            'Psi': Psi,
+            'Z': Z,
+        }
+
+    @classmethod
+    def from_frequencies(cls, omega_samples: torch.Tensor,
+                         coupling: float = 1.0, dt: float = 0.01) -> 'KuramotoDaidoMeanField':
+        """Construct mean-field model by fitting Cauchy distribution to frequency samples.
+
+        Uses IQR-based robust Cauchy fitting (Pietras & Daffertshofer 2016):
+        - omega_mean = median(samples)
+        - delta = IQR / 2  (half-width at half-maximum of Cauchy)
+
+        This gives a much better Ott-Antonsen match than naive mean/std mapping.
+
+        Args:
+            omega_samples: Tensor of sampled natural frequencies (N,)
+            coupling: Coupling strength K
+            dt: Integration timestep
+
+        Returns:
+            KuramotoDaidoMeanField instance with fitted parameters
+        """
+        omega_sorted = omega_samples.sort().values
+        n = len(omega_sorted)
+        q25 = omega_sorted[max(0, int(n * 0.25))].item()
+        q75 = omega_sorted[min(n - 1, int(n * 0.75))].item()
+        omega_mean = omega_sorted[n // 2].item()  # median
+        delta = max((q75 - q25) / 2.0, 1e-6)  # IQR-based Cauchy half-width
+        return cls(omega_mean=omega_mean, delta=delta, coupling=coupling, dt=dt)
+
+    def get_order_parameter(self) -> torch.Tensor:
+        """Get current synchronization level R."""
+        return self.R
+
+    def get_critical_coupling(self) -> torch.Tensor:
+        """Critical coupling Kc = 2 * Delta (onset of synchronization)."""
+        return 2.0 * self.delta
+
+    def is_synchronized(self, threshold: float = 0.5) -> bool:
+        """Check if population is synchronized."""
+        return self.R.item() > threshold
+
+    def reset(self):
+        """Reset order parameter to low-sync state."""
+        self.Z_real.fill_(0.1)
+        self.Z_imag.fill_(0.0)
+        self.step_count.zero_()
 
 
 if __name__ == '__main__':

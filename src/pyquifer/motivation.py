@@ -65,6 +65,43 @@ class NoveltyDetector(nn.Module):
         self.register_buffer('memory_ptr', torch.tensor(0))
         self.register_buffer('memory_filled', torch.tensor(False))
 
+    def _episodic_novelty(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Compute novelty by comparing x to stored episodic memories.
+
+        Uses cosine similarity with 90th percentile aggregation:
+        high score = very similar to at least some memories = low novelty.
+
+        Args:
+            x: Input pattern (batch, dim)
+
+        Returns:
+            episodic_bonus: Per-batch novelty bonus in [0, 1]
+        """
+        n_valid = self.memory_ptr.item()
+        if not self.memory_filled and n_valid == 0:
+            # No memories yet — everything is novel
+            return torch.ones(x.shape[0], device=x.device)
+
+        if self.memory_filled:
+            n_valid = self.memory_size
+
+        valid_memories = self.memory[:n_valid]  # (n_valid, dim)
+
+        # Cosine similarity: (batch, n_valid)
+        x_norm = x / (x.norm(dim=1, keepdim=True) + 1e-8)
+        mem_norm = valid_memories / (valid_memories.norm(dim=1, keepdim=True) + 1e-8)
+        sim = torch.matmul(x_norm, mem_norm.T)  # (batch, n_valid)
+
+        # 90th percentile of similarities — how similar to the MOST similar memory
+        k = max(1, n_valid // 10)  # top 10% → 90th percentile
+        top_k_sim, _ = sim.topk(k, dim=1)
+        max_sim = top_k_sim.mean(dim=1)  # mean of top-k similarities
+
+        # Novelty = 1 - max_similarity (clamped to [0, 1])
+        episodic_bonus = torch.clamp(1.0 - max_sim, 0.0, 1.0)
+        return episodic_bonus
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Process input and return novelty signal.
@@ -98,9 +135,15 @@ class NoveltyDetector(nn.Module):
         context_novelty = (self.fast_mean - self.slow_mean).abs() / (self.slow_var.sqrt() + 1e-6)
         context_weight = torch.sigmoid(context_novelty.mean() - 1.0)  # High if context is novel
 
+        # Episodic novelty: compare to stored memories
+        episodic_bonus = self._episodic_novelty(x)
+
         # Combined novelty signal with diminishing returns (can't be infinitely surprised)
         raw_novelty = fast_novelty * (1.0 + context_weight)
         novelty = torch.tanh(raw_novelty / 2.0)  # Soft saturation at 1.0
+
+        # Blend in episodic memory-based novelty
+        novelty = torch.clamp(novelty + 0.3 * episodic_bonus, 0.0, 1.0)
 
         # Update expectations with new data
         with torch.no_grad():
@@ -116,13 +159,14 @@ class NoveltyDetector(nn.Module):
             self.slow_mean = (1 - self.slow_tau) * self.slow_mean + self.slow_tau * x_mean
             self.slow_var = (1 - self.slow_tau) * self.slow_var + self.slow_tau * x_var
 
-            # Store in episodic memory (reserved for future similarity-based novelty)
-            for i in range(min(batch_size, self.memory_size)):
-                idx = (self.memory_ptr + i) % self.memory_size
-                self.memory[idx] = x[i]
-            self.memory_ptr = (self.memory_ptr + batch_size) % self.memory_size
-            if self.memory_ptr < batch_size:
-                self.memory_filled = torch.tensor(True, device=x.device)
+            # Store in episodic memory only if sufficiently novel
+            if episodic_bonus.mean() > 0.1:
+                for i in range(min(batch_size, self.memory_size)):
+                    idx = (self.memory_ptr + i) % self.memory_size
+                    self.memory[idx] = x[i]
+                self.memory_ptr = (self.memory_ptr + batch_size) % self.memory_size
+                if self.memory_ptr < batch_size:
+                    self.memory_filled = torch.tensor(True, device=x.device)
 
         return novelty, prediction_error
 

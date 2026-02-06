@@ -501,6 +501,159 @@ class PredictiveCoding(nn.Module):
         }
 
 
+class DifferentiablePlasticity(nn.Module):
+    """
+    Differentiable Hebbian plasticity (Miconi et al. 2018).
+
+    Combines fixed weights with a fast Hebbian trace:
+        y = tanh(x @ (W + alpha * H))
+
+    Where:
+    - W: Slow (backprop-trained) weights
+    - H: Fast Hebbian trace, updated each step: H += eta * outer(y, x)
+    - alpha: Learnable scalar controlling plasticity influence
+    - eta: Learnable learning rate for Hebbian trace
+    - H is clamped to [-1, 1] to prevent runaway
+
+    This enables rapid adaptation within a single episode while
+    maintaining the stability of learned baseline weights.
+
+    Args:
+        input_dim: Input dimension
+        output_dim: Output dimension
+        eta_init: Initial Hebbian learning rate
+        alpha_init: Initial plasticity influence
+    """
+
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int,
+                 eta_init: float = 0.01,
+                 alpha_init: float = 0.1):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+        # Slow weights (trained by backprop)
+        self.W = nn.Parameter(torch.randn(output_dim, input_dim) * 0.1)
+
+        # Learnable plasticity parameters
+        self.alpha = nn.Parameter(torch.tensor(alpha_init))
+        self.eta = nn.Parameter(torch.tensor(eta_init))
+
+        # Fast Hebbian trace (not a parameter — updated online)
+        self.register_buffer('H', torch.zeros(output_dim, input_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with Hebbian-augmented weights.
+
+        Args:
+            x: Input tensor (..., input_dim)
+
+        Returns:
+            Output tensor (..., output_dim)
+        """
+        # Effective weight = fixed + plasticity * Hebbian
+        W_eff = self.W + self.alpha * self.H
+        y = torch.tanh(x @ W_eff.T)
+
+        # Update Hebbian trace
+        with torch.no_grad():
+            if x.dim() == 1:
+                outer = torch.outer(y, x)
+            else:
+                # Batch: average outer product
+                outer = torch.einsum('bi,bj->ij', y, x) / x.shape[0]
+
+            self.H.add_(self.eta.item() * outer)
+            self.H.clamp_(-1.0, 1.0)
+
+        return y
+
+    def reset(self):
+        """Reset Hebbian trace (e.g., between episodes)."""
+        self.H.zero_()
+
+
+class LearnableEligibilityTrace(nn.Module):
+    """
+    Eligibility trace with optionally learnable decay parameter.
+
+    Extends EligibilityTrace: when learnable=True, the decay_rate
+    becomes an nn.Parameter that can be optimized by backprop.
+
+    Args:
+        shape: Shape of the parameter to track
+        decay_rate: Initial decay rate (0-1)
+        accumulation_rate: How fast new activity accumulates
+        learnable: If True, decay_rate is an nn.Parameter
+    """
+
+    def __init__(self,
+                 shape: Tuple[int, ...],
+                 decay_rate: float = 0.95,
+                 accumulation_rate: float = 0.1,
+                 learnable: bool = False):
+        super().__init__()
+        self.accumulation_rate = accumulation_rate
+        self.learnable = learnable
+
+        if learnable:
+            # Store in logit space for unconstrained optimization
+            # sigmoid(logit) = decay_rate
+            logit = math.log(decay_rate / (1 - decay_rate + 1e-8))
+            self.decay_logit = nn.Parameter(torch.tensor(logit))
+        else:
+            self.decay_rate_val = decay_rate
+
+        self.register_buffer('trace', torch.zeros(shape))
+
+    @property
+    def decay_rate(self) -> torch.Tensor:
+        if self.learnable:
+            return torch.sigmoid(self.decay_logit)
+        else:
+            return torch.tensor(self.decay_rate_val)
+
+    def forward(self,
+                activity: torch.Tensor,
+                pre_activity: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Update eligibility trace based on current activity.
+
+        Args:
+            activity: Current activity signal (same shape as trace)
+            pre_activity: Optional presynaptic activity
+
+        Returns:
+            Current trace value
+        """
+        decay = self.decay_rate
+
+        with torch.no_grad():
+            self.trace.mul_(decay.item() if isinstance(decay, torch.Tensor) else decay)
+
+            if pre_activity is not None:
+                if activity.dim() == 1 and pre_activity.dim() == 1:
+                    hebbian = torch.outer(activity, pre_activity)
+                else:
+                    hebbian = activity * pre_activity
+                self.trace.add_(self.accumulation_rate * hebbian)
+            else:
+                self.trace.add_(self.accumulation_rate * activity)
+
+        return self.trace.clone()
+
+    def apply_reward(self, reward: torch.Tensor, learning_rate: float = 0.01) -> torch.Tensor:
+        """Compute weight update from trace and reward."""
+        return learning_rate * reward * self.trace
+
+    def reset(self):
+        """Reset trace to zero."""
+        self.trace.zero_()
+
+
 if __name__ == '__main__':
     print("--- Learning Rules Beyond Backprop Examples ---")
 

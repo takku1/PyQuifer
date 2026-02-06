@@ -31,6 +31,7 @@ class SynapticNeuron(nn.Module):
                  alpha: float = 0.9,
                  beta: float = 0.8,
                  threshold: float = 1.0,
+                 V_rest: float = 0.0,
                  reset_mechanism: str = 'subtract',
                  surrogate_grad: Optional[Callable] = None):
         """
@@ -38,6 +39,7 @@ class SynapticNeuron(nn.Module):
             alpha: Synaptic current decay rate (0 < α < 1)
             beta: Membrane potential decay rate (0 < β < 1)
             threshold: Spike threshold
+            V_rest: Resting membrane potential (G-03: prevents unbounded accumulation)
             reset_mechanism: 'subtract' or 'zero'
             surrogate_grad: Custom surrogate gradient function
         """
@@ -45,6 +47,7 @@ class SynapticNeuron(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.threshold = threshold
+        self.V_rest = V_rest
         self.reset_mechanism = reset_mechanism
 
         if surrogate_grad is None:
@@ -79,8 +82,8 @@ class SynapticNeuron(nn.Module):
         # Synaptic current dynamics
         syn = self.alpha * syn + x
 
-        # Membrane dynamics
-        mem = self.beta * mem + syn
+        # Membrane dynamics (G-03: decay toward V_rest, matching snntorch Synaptic)
+        mem = self.beta * (mem - self.V_rest) + self.V_rest + syn
 
         # Spike generation with surrogate gradient
         spike = self._spike_fn(mem - self.threshold)
@@ -239,6 +242,27 @@ class RecurrentSynapticLayer(nn.Module):
             self.V_rec = nn.Parameter(torch.ones(hidden_dim) * 0.5)
         # else: no recurrence
 
+    def prune(self, fraction: float):
+        """Magnitude-prune input weights (G-05).
+
+        Zeros out the smallest `fraction` of W_in weights and stores a permanent mask.
+
+        Args:
+            fraction: Fraction of weights to prune, in [0, 1]
+        """
+        with torch.no_grad():
+            w = self.W_in.weight
+            magnitudes = w.abs().flatten()
+            k = max(1, int(fraction * magnitudes.numel()))
+            threshold_val = magnitudes.kthvalue(k).values
+
+            mask = (w.abs() >= threshold_val).float()
+            if not hasattr(self, 'weight_mask'):
+                self.register_buffer('weight_mask', mask)
+            else:
+                self.weight_mask.copy_(mask)
+            w.mul_(mask)
+
     def forward(self, x: torch.Tensor,
                 syn: Optional[torch.Tensor] = None,
                 mem: Optional[torch.Tensor] = None,
@@ -263,6 +287,11 @@ class RecurrentSynapticLayer(nn.Module):
             mem = torch.zeros(batch_size, self.hidden_dim, device=x.device)
         if spk is None:
             spk = torch.zeros(batch_size, self.hidden_dim, device=x.device)
+
+        # Apply pruning mask if it exists
+        if hasattr(self, 'weight_mask') and self.weight_mask is not None:
+            with torch.no_grad():
+                self.W_in.weight.mul_(self.weight_mask)
 
         # Input current
         i_in = self.W_in(x)
@@ -472,6 +501,173 @@ class EligibilityModulatedSTDP(nn.Module):
 
             # Reset eligibility after reward
             self.eligibility.zero_()
+
+
+class EpropSTDP(nn.Module):
+    """
+    E-prop learning rule with dual eligibility traces.
+
+    Extends standard eligibility-modulated STDP with biologically realistic
+    dual traces:
+    - Fast voltage trace (~20ms): tracks membrane potential fluctuations
+    - Slow adaptation trace (~200ms): tracks adaptation current
+
+    Uses pseudo-derivative for surrogate gradient and refractory masking.
+
+    Same apply_reward() interface as EligibilityModulatedSTDP — reward.item()
+    severs gradient BY DESIGN (neuromodulatory scalar).
+
+    References:
+    - Bellec et al. (2020). A solution to the learning dilemma for RNNs.
+    - Zenke & Neftci (2021). Brain-inspired learning on neuromorphic substrates.
+
+    Args:
+        pre_dim: Presynaptic dimension
+        post_dim: Postsynaptic dimension
+        tau_fast: Fast (voltage) trace time constant (~20ms)
+        tau_slow: Slow (adaptation) trace time constant (~200ms)
+        learning_rate: Learning rate for weight updates
+        dampening: Pseudo-derivative dampening factor
+        refractory_steps: Number of steps after spike where neuron is refractory
+    """
+
+    def __init__(self,
+                 pre_dim: int,
+                 post_dim: int,
+                 tau_fast: float = 20.0,
+                 tau_slow: float = 200.0,
+                 learning_rate: float = 0.01,
+                 dampening: float = 0.3,
+                 refractory_steps: int = 5):
+        super().__init__()
+        self.pre_dim = pre_dim
+        self.post_dim = post_dim
+        self.tau_fast = tau_fast
+        self.tau_slow = tau_slow
+        self.lr = learning_rate
+        self.dampening = dampening
+        self.refractory_steps = refractory_steps
+
+        # Synaptic weights
+        self.weight = nn.Parameter(
+            torch.randn(post_dim, pre_dim) / math.sqrt(pre_dim)
+        )
+
+        # Dual eligibility traces
+        self.register_buffer('trace_fast', torch.zeros(post_dim, pre_dim))
+        self.register_buffer('trace_slow', torch.zeros(post_dim, pre_dim))
+
+        # Combined eligibility (weighted sum of fast + slow)
+        self.register_buffer('eligibility', torch.zeros(post_dim, pre_dim))
+
+        # Presynaptic filtered trace
+        self.register_buffer('pre_trace', torch.zeros(pre_dim))
+
+        # Refractory counter per post-synaptic neuron
+        self.register_buffer('refractory_counter', torch.zeros(post_dim))
+
+    def _pseudo_derivative(self, v_scaled: torch.Tensor) -> torch.Tensor:
+        """
+        Pseudo-derivative for surrogate gradient.
+
+        psi(v) = dampening * max(0, 1 - |v|)
+
+        Args:
+            v_scaled: Scaled membrane potential (v - threshold) / threshold
+        """
+        return self.dampening * torch.clamp(1.0 - torch.abs(v_scaled), min=0.0)
+
+    def forward(self, pre_spike: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass (linear projection through weights).
+
+        Args:
+            pre_spike: Presynaptic spikes (batch, pre_dim)
+
+        Returns:
+            Postsynaptic current (batch, post_dim)
+        """
+        return F.linear(pre_spike, self.weight)
+
+    def update_traces(self,
+                      pre_spike: torch.Tensor,
+                      post_spike: torch.Tensor,
+                      membrane_potential: torch.Tensor,
+                      threshold: float = 1.0,
+                      dt: float = 1.0):
+        """
+        Update dual eligibility traces.
+
+        Args:
+            pre_spike: Presynaptic spikes (batch, pre_dim)
+            post_spike: Postsynaptic spikes (batch, post_dim)
+            membrane_potential: Post-synaptic membrane potential (batch, post_dim)
+            threshold: Spike threshold
+            dt: Timestep
+        """
+        with torch.no_grad():
+            # Average over batch
+            pre = pre_spike.mean(dim=0)
+            post = post_spike.mean(dim=0)
+            v_mean = membrane_potential.mean(dim=0)
+
+            # Refractory masking
+            refractory_mask = (self.refractory_counter <= 0).float()
+            # Update refractory counter
+            self.refractory_counter.sub_(1).clamp_(min=0)
+            # Set refractory for neurons that just spiked
+            spiked = post > 0.5
+            self.refractory_counter[spiked] = self.refractory_steps
+
+            # Pseudo-derivative of membrane potential
+            v_scaled = (v_mean - threshold) / (threshold + 1e-8)
+            psi = self._pseudo_derivative(v_scaled) * refractory_mask
+
+            # Update filtered presynaptic trace
+            decay_pre = math.exp(-dt / self.tau_fast)
+            self.pre_trace.mul_(decay_pre).add_(pre)
+
+            # STDP-like correlation modulated by pseudo-derivative
+            # e_ij = psi_j * x_i (filtered pre trace * post pseudo-derivative)
+            instant_trace = torch.outer(psi, self.pre_trace)
+
+            # Fast trace: tracks voltage dynamics (~20ms)
+            decay_fast = math.exp(-dt / self.tau_fast)
+            self.trace_fast.mul_(decay_fast).add_(instant_trace)
+
+            # Slow trace: tracks adaptation (~200ms)
+            decay_slow = math.exp(-dt / self.tau_slow)
+            self.trace_slow.mul_(decay_slow).add_(instant_trace)
+
+            # Combined eligibility: weighted average of traces
+            # Fast trace dominates for recent correlations,
+            # slow trace provides temporal credit over longer windows
+            self.eligibility.copy_(0.7 * self.trace_fast + 0.3 * self.trace_slow)
+
+    def apply_reward(self, reward: torch.Tensor):
+        """
+        Apply reward-modulated weight update using dual eligibility.
+
+        Args:
+            reward: Reward signal (scalar). reward.item() intentionally
+                   severs gradient — neuromodulatory scalar by design.
+        """
+        with torch.no_grad():
+            # Three-factor rule: dw = lr * reward * eligibility
+            self.weight.data += self.lr * reward.item() * self.eligibility
+
+            # Reset eligibility after reward
+            self.eligibility.zero_()
+            self.trace_fast.zero_()
+            self.trace_slow.zero_()
+
+    def reset(self):
+        """Reset all traces and refractory counters."""
+        self.trace_fast.zero_()
+        self.trace_slow.zero_()
+        self.eligibility.zero_()
+        self.pre_trace.zero_()
+        self.refractory_counter.zero_()
 
 
 if __name__ == '__main__':

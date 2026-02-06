@@ -61,7 +61,10 @@ class LIFNeuron(nn.Module):
                  v_reset: float = 0.0,
                  v_rest: float = 0.0,
                  dt: float = 1.0,
-                 learnable: bool = True):
+                 learnable: bool = True,
+                 refractory_period: int = 0,
+                 spike_mode: Literal['binary', 'ternary', 'graded'] = 'binary',
+                 max_grade: float = 3.0):
         """
         Args:
             tau: Membrane time constant (higher = slower decay)
@@ -70,11 +73,17 @@ class LIFNeuron(nn.Module):
             v_rest: Resting membrane potential
             dt: Simulation timestep
             learnable: Whether parameters are learnable
+            refractory_period: Number of timesteps after spike where neuron cannot fire (G-13)
+            spike_mode: 'binary' (0/1), 'ternary' (-1/0/1), or 'graded' (multi-bit) (G-14)
+            max_grade: Maximum graded spike amplitude (only for spike_mode='graded')
         """
         super().__init__()
         self.dt = dt
         self.v_reset = v_reset
         self.v_rest = v_rest
+        self.refractory_period = refractory_period
+        self.spike_mode = spike_mode
+        self.max_grade = max_grade
 
         # Learnable parameters (use log for positivity constraint)
         if learnable:
@@ -93,26 +102,64 @@ class LIFNeuron(nn.Module):
         """Membrane decay factor per timestep."""
         return torch.exp(-self.dt / self.tau)
 
-    def forward(self, current: torch.Tensor, membrane: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, current: torch.Tensor, membrane: torch.Tensor,
+                refractory_counter: Optional[torch.Tensor] = None
+                ) -> Tuple[torch.Tensor, torch.Tensor, ...]:
         """
         Single timestep update.
 
         Args:
             current: Input current (batch, neurons)
             membrane: Current membrane potential (batch, neurons)
+            refractory_counter: Optional refractory counter tensor. If refractory_period > 0
+                               and this is None, a zero counter is created.
 
         Returns:
-            spikes: Binary spike tensor (batch, neurons)
+            spikes: Spike tensor (batch, neurons)
             membrane: Updated membrane potential (batch, neurons)
+            refractory_counter: (only if refractory_period > 0) Updated counter
         """
+        # Handle refractory counter initialization
+        if self.refractory_period > 0 and refractory_counter is None:
+            refractory_counter = torch.zeros_like(membrane)
+
         # Leaky integration
         membrane = self.decay * (membrane - self.v_rest) + self.v_rest + current * self.dt / self.tau
 
-        # Generate spikes with surrogate gradient
-        spikes = surrogate_spike(membrane, self.threshold)
+        # G-13: Clamp membrane during refractory period
+        if self.refractory_period > 0:
+            in_refractory = (refractory_counter > 0).float()
+            membrane = membrane * (1 - in_refractory) + self.v_reset * in_refractory
 
-        # Reset after spike
-        membrane = membrane * (1 - spikes) + self.v_reset * spikes
+        # G-14: Spike generation based on mode
+        if self.spike_mode == 'binary':
+            spikes = surrogate_spike(membrane, self.threshold)
+        elif self.spike_mode == 'ternary':
+            # Positive spike when V >= threshold, negative when V <= -threshold + 2*v_rest
+            pos_spikes = surrogate_spike(membrane, self.threshold)
+            neg_spikes = surrogate_spike(-membrane + 2 * self.v_rest, self.threshold)
+            spikes = pos_spikes - neg_spikes
+        elif self.spike_mode == 'graded':
+            # Multi-bit: amplitude encodes how much threshold was exceeded
+            over_threshold = surrogate_spike(membrane, self.threshold)
+            grade = ((membrane - self.threshold) / (self.threshold + 1e-8)).clamp(0, self.max_grade)
+            spikes = over_threshold * grade
+        else:
+            spikes = surrogate_spike(membrane, self.threshold)
+
+        # G-13: Force zero spikes during refractory
+        if self.refractory_period > 0:
+            spikes = spikes * (1 - in_refractory)
+
+        # Reset after spike (use abs for ternary/graded)
+        spike_mask = (spikes.abs() > 0).float()
+        membrane = membrane * (1 - spike_mask) + self.v_reset * spike_mask
+
+        # G-13: Update refractory counter
+        if self.refractory_period > 0:
+            refractory_counter = (refractory_counter - 1).clamp(min=0)
+            refractory_counter = refractory_counter + spike_mask * self.refractory_period
+            return spikes, membrane, refractory_counter
 
         return spikes, membrane
 
@@ -160,6 +207,28 @@ class SpikingLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
+    def prune(self, fraction: float):
+        """Magnitude-prune input projection weights (G-05).
+
+        Zeros out the smallest `fraction` of weights by absolute value
+        and applies a permanent mask so they stay zero in forward passes.
+
+        Args:
+            fraction: Fraction of weights to prune, in [0, 1]
+        """
+        with torch.no_grad():
+            w = self.input_proj.weight
+            magnitudes = w.abs().flatten()
+            k = max(1, int(fraction * magnitudes.numel()))
+            threshold_val = magnitudes.kthvalue(k).values
+
+            mask = (w.abs() >= threshold_val).float()
+            if not hasattr(self, 'weight_mask'):
+                self.register_buffer('weight_mask', mask)
+            else:
+                self.weight_mask.copy_(mask)
+            w.mul_(mask)
+
     def forward(self, x: torch.Tensor, return_membrane: bool = False) -> torch.Tensor:
         """
         Process sequence through spiking layer.
@@ -180,6 +249,11 @@ class SpikingLayer(nn.Module):
 
         all_spikes = []
         all_membrane = [] if return_membrane else None
+
+        # Apply pruning mask if it exists
+        if hasattr(self, 'weight_mask') and self.weight_mask is not None:
+            with torch.no_grad():
+                self.input_proj.weight.mul_(self.weight_mask)
 
         for t in range(seq_len):
             # Input current from external input
@@ -352,7 +426,10 @@ class STDPLayer(nn.Module):
                  a_plus: float = 0.01,
                  a_minus: float = 0.01,
                  w_max: float = 1.0,
-                 w_min: float = 0.0):
+                 w_min: float = 0.0,
+                 target_rate: float = 0.1,
+                 homeostatic_strength: float = 0.001,
+                 auto_scale: bool = False):
         """
         Args:
             pre_size: Number of presynaptic neurons
@@ -363,6 +440,9 @@ class STDPLayer(nn.Module):
             a_minus: LTD amplitude
             w_max: Maximum weight
             w_min: Minimum weight
+            target_rate: Target post-synaptic firing rate for homeostatic regulation
+            homeostatic_strength: Strength of Zenke-style homeostatic correction
+            auto_scale: If True, scale a_plus/a_minus inversely by running rate (G-06)
         """
         super().__init__()
         self.tau_plus = tau_plus
@@ -371,6 +451,9 @@ class STDPLayer(nn.Module):
         self.a_minus = a_minus
         self.w_max = w_max
         self.w_min = w_min
+        self.target_rate = target_rate
+        self.homeostatic_strength = homeostatic_strength
+        self.auto_scale = auto_scale
 
         # Synaptic weights
         self.weights = nn.Parameter(torch.rand(post_size, pre_size) * 0.5)
@@ -378,6 +461,9 @@ class STDPLayer(nn.Module):
         # Eligibility traces: per-batch (batch, size) to avoid cross-sample contamination
         self.register_buffer('pre_trace', torch.zeros(1, pre_size))
         self.register_buffer('post_trace', torch.zeros(1, post_size))
+
+        # Homeostatic: running firing rate of post-synaptic neurons (EMA)
+        self.register_buffer('running_rate', torch.full((post_size,), target_rate))
 
     def _ensure_trace_batch(self, batch_size: int, device: torch.device):
         """Expand traces to match batch size if needed."""
@@ -409,21 +495,41 @@ class STDPLayer(nn.Module):
             self.post_trace.mul_(math.exp(-dt / self.tau_minus))
 
         if learn:
+            # G-06: Auto-scale LTP/LTD by inverse running rate
+            if self.auto_scale:
+                rate_scale = 1.0 / self.running_rate.mean().clamp(min=0.01)
+                effective_a_plus = self.a_plus * rate_scale
+                effective_a_minus = self.a_minus * rate_scale
+            else:
+                effective_a_plus = self.a_plus
+                effective_a_minus = self.a_minus
+
             # Compute weight updates BEFORE updating traces (M-03 fix)
             # Per-batch STDP, averaged over batch for shared weight update
             # LTP: post spike after pre spike (use old pre_trace)
             # dw_plus[b] = outer(post_spikes[b], pre_trace[b]), then average
-            dw_plus = self.a_plus * torch.einsum('bp,bq->pq', post_spikes, self.pre_trace) / batch_size
+            dw_plus = effective_a_plus * torch.einsum('bp,bq->pq', post_spikes, self.pre_trace) / batch_size
 
             # LTD: pre spike after post spike (use old post_trace)
-            dw_minus = -self.a_minus * torch.einsum('bp,bq->pq', self.post_trace, pre_spikes) / batch_size
+            dw_minus = -effective_a_minus * torch.einsum('bp,bq->pq', self.post_trace, pre_spikes) / batch_size
 
-            # Apply weight updates with bounds
+            # Homeostatic correction: push rates toward target
+            # dw_homeo = -strength * (rate - target).unsqueeze(1)
+            # This penalizes synapses of neurons firing too fast, boosts slow ones
+            rate_error = self.running_rate - self.target_rate
+            dw_homeo = -self.homeostatic_strength * rate_error.unsqueeze(1)
+
+            # Apply weight updates with bounds (STDP + homeostatic)
             with torch.no_grad():
                 self.weights.data = torch.clamp(
-                    self.weights.data + dw_plus + dw_minus,
+                    self.weights.data + dw_plus + dw_minus + dw_homeo,
                     self.w_min, self.w_max
                 )
+
+                # Update running firing rate (EMA with tau ~100 steps)
+                rate_alpha = 0.01
+                batch_rate = post_spikes.mean(dim=0)
+                self.running_rate.mul_(1 - rate_alpha).add_(rate_alpha * batch_rate)
 
         # Update traces with new spikes AFTER weight computation (per-batch)
         with torch.no_grad():
@@ -439,6 +545,311 @@ class STDPLayer(nn.Module):
         with torch.no_grad():
             self.pre_trace.zero_()
             self.post_trace.zero_()
+
+
+class AdExNeuron(nn.Module):
+    """
+    Adaptive Exponential Integrate-and-Fire (AdEx) neuron.
+
+    Extends LIF with:
+    1. Exponential spike initiation: voltage accelerates near threshold
+    2. Adaptation current w: accumulates with each spike, slows firing
+
+    Dynamics:
+        C * dV/dt = -gL*(V - EL) + gL*DT*exp((V - VT)/DT) - w + I
+        tau_w * dw/dt = a*(V - EL) - w
+        On spike: V → V_reset, w → w + b
+
+    By varying (a, b), produces 8+ firing patterns:
+    - (a=0, b=0): Regular spiking
+    - (a=0, b>0): Adapting
+    - (a>0, b=0): Subthreshold oscillation
+    - (a>0, b>0): Adapting + oscillation
+    - (a<0, b=0): Fast spiking / delayed
+    - etc.
+
+    Args:
+        C: Membrane capacitance
+        gL: Leak conductance
+        EL: Leak reversal potential
+        VT: Threshold voltage (for exponential term)
+        DT: Sharpness of spike initiation (slope factor)
+        V_reset: Reset voltage after spike
+        V_cutoff: Voltage cutoff for spike detection
+        tau_w: Adaptation time constant
+        a: Subthreshold adaptation coupling
+        b: Spike-triggered adaptation increment
+        dt: Integration timestep
+    """
+
+    def __init__(self,
+                 C: float = 1.0,
+                 gL: float = 0.1,
+                 EL: float = -0.7,
+                 VT: float = -0.5,
+                 DT: float = 0.1,
+                 V_reset: float = -0.7,
+                 V_cutoff: float = 0.5,
+                 tau_w: float = 100.0,
+                 a: float = 0.0,
+                 b: float = 0.05,
+                 dt: float = 1.0):
+        super().__init__()
+        self.C = C
+        self.gL = gL
+        self.EL = EL
+        self.VT = VT
+        self.DT = DT
+        self.V_reset = V_reset
+        self.V_cutoff = V_cutoff
+        self.tau_w = tau_w
+        self.a = a
+        self.b = b
+        self.dt = dt
+
+    def forward(self,
+                current: torch.Tensor,
+                V: torch.Tensor,
+                w: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Single timestep update.
+
+        Args:
+            current: Input current (..., neurons)
+            V: Membrane potential (..., neurons)
+            w: Adaptation current (..., neurons)
+
+        Returns:
+            spikes: Binary spike tensor
+            V: Updated membrane potential
+            w: Updated adaptation current
+        """
+        # Exponential term (clamped to prevent overflow)
+        exp_term = self.gL * self.DT * torch.exp(
+            torch.clamp((V - self.VT) / (self.DT + 1e-8), max=10.0)
+        )
+
+        # Voltage dynamics: C * dV/dt = -gL*(V-EL) + gL*DT*exp(...) - w + I
+        dV = (-self.gL * (V - self.EL) + exp_term - w + current) / self.C
+        V_new = V + dV * self.dt
+
+        # Adaptation dynamics: tau_w * dw/dt = a*(V-EL) - w
+        dw = (self.a * (V - self.EL) - w) / self.tau_w
+        w_new = w + dw * self.dt
+
+        # Spike detection
+        spikes = (V_new >= self.V_cutoff).float()
+
+        # Surrogate gradient for differentiability
+        if self.training:
+            v_scaled = V_new - self.V_cutoff
+            grad = 25.0 / (1 + (25.0 * torch.abs(v_scaled)) ** 2)
+            spikes = spikes + (grad - spikes).detach()
+
+        # Reset on spike
+        V_new = V_new * (1 - spikes) + self.V_reset * spikes
+        w_new = w_new + self.b * spikes  # Spike-triggered adaptation
+
+        return spikes, V_new, w_new
+
+    def init_state(self, shape: Tuple[int, ...],
+                   device: torch.device = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Initialize V and w to resting state."""
+        V = torch.full(shape, self.EL, device=device)
+        w = torch.zeros(shape, device=device)
+        return V, w
+
+
+class SpikeEncoder(nn.Module):
+    """Encode continuous values into spike trains (G-04).
+
+    Two encoding modes:
+    - 'rate': Poisson rate coding. Each neuron fires with probability proportional
+      to the input value. Based on Heeger (2000) Poisson spike generation.
+    - 'population': Gaussian population coding. N neurons with tuning curves
+      centered at different values fire probabilistically based on proximity to input.
+
+    Args:
+        num_neurons: Number of output spiking neurons
+        mode: 'rate' or 'population'
+        gain: Gain factor for rate coding (scales input to firing probability)
+        sigma: Width of Gaussian tuning curves (population mode)
+    """
+
+    def __init__(self,
+                 num_neurons: int,
+                 mode: Literal['rate', 'population'] = 'rate',
+                 gain: float = 1.0,
+                 sigma: float = 0.3):
+        super().__init__()
+        self.num_neurons = num_neurons
+        self.mode = mode
+        self.gain = gain
+        self.sigma = sigma
+
+        if mode == 'population':
+            # Tuning curve centers uniformly spaced in [0, 1]
+            centers = torch.linspace(0, 1, num_neurons)
+            self.register_buffer('centers', centers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode input values as spike trains.
+
+        Args:
+            x: Input tensor (..., features). Values should be roughly in [0, 1] for rate mode.
+
+        Returns:
+            Spike tensor (..., num_neurons)
+        """
+        if self.mode == 'rate':
+            # Expand to num_neurons if needed
+            if x.shape[-1] != self.num_neurons:
+                x = x.unsqueeze(-1).expand(*x.shape, self.num_neurons)
+                # Average over original feature dim
+                if x.dim() > 2:
+                    x = x.mean(dim=-2)
+            rates = (self.gain * x).clamp(0, 1)
+            spikes = torch.bernoulli(rates)
+            return spikes
+
+        else:  # population
+            # Gaussian tuning curves: r_i = exp(-(x - mu_i)^2 / (2*sigma^2))
+            # x shape: (..., features), centers: (num_neurons,)
+            # Average features to scalar for tuning
+            x_scalar = x.mean(dim=-1, keepdim=True)  # (..., 1)
+            # Broadcasting: (..., 1) - (num_neurons,) -> (..., num_neurons)
+            rates = torch.exp(-((x_scalar - self.centers) ** 2) / (2 * self.sigma ** 2))
+            spikes = torch.bernoulli(rates)
+            return spikes
+
+
+class SpikeDecoder(nn.Module):
+    """Decode spike trains back to continuous values (G-08).
+
+    Three decoding modes:
+    - 'rate': Mean firing rate over time dimension
+    - 'first_spike': Inverse latency coding (1 / (first_spike_time + 1))
+    - 'population_vector': Weighted average by neuron index
+
+    Args:
+        num_neurons: Number of input spiking neurons
+        mode: Decoding mode
+        time_dim: Which dimension is the time/sequence dimension
+    """
+
+    def __init__(self,
+                 num_neurons: int,
+                 mode: Literal['rate', 'first_spike', 'population_vector'] = 'rate',
+                 time_dim: int = 1):
+        super().__init__()
+        self.num_neurons = num_neurons
+        self.mode = mode
+        self.time_dim = time_dim
+
+        if mode == 'population_vector':
+            # Neuron indices as weights for population vector decoding
+            weights = torch.linspace(0, 1, num_neurons)
+            self.register_buffer('weights', weights)
+
+    def forward(self, spikes: torch.Tensor) -> torch.Tensor:
+        """Decode spike tensor to continuous output.
+
+        Args:
+            spikes: Spike tensor. For 'rate'/'first_spike': (batch, time, neurons).
+                    For 'population_vector': (..., neurons).
+
+        Returns:
+            Decoded continuous values
+        """
+        if self.mode == 'rate':
+            return spikes.mean(dim=self.time_dim)
+
+        elif self.mode == 'first_spike':
+            # Find first spike time per neuron
+            # Shape: (batch, time, neurons)
+            has_spike = spikes.abs() > 0.5
+            # Argmax returns first True along time dim
+            first_time = has_spike.float().argmax(dim=self.time_dim).float()
+            # If no spike: set to max time
+            no_spike = ~has_spike.any(dim=self.time_dim)
+            first_time[no_spike] = spikes.shape[self.time_dim]
+            # Inverse latency: early spike = high value
+            return 1.0 / (first_time + 1.0)
+
+        elif self.mode == 'population_vector':
+            # Weighted average: sum(spike_i * w_i) / sum(spike_i + eps)
+            weighted = spikes * self.weights
+            return weighted.sum(dim=-1) / (spikes.sum(dim=-1) + 1e-8)
+
+        else:
+            return spikes.mean(dim=self.time_dim)
+
+
+class SynapticDelay(nn.Module):
+    """Circular buffer implementing axonal/synaptic transmission delays (G-15).
+
+    Stores a history of spike patterns and delivers delayed versions.
+    Delays are per-synapse (not per-neuron pair) for efficiency.
+
+    Args:
+        num_synapses: Number of synapses (typically num_neurons)
+        max_delay: Maximum delay in timesteps
+    """
+
+    def __init__(self, num_synapses: int, max_delay: int = 10):
+        super().__init__()
+        self.num_synapses = num_synapses
+        self.max_delay = max_delay
+
+        # Circular buffer: (max_delay, num_synapses)
+        self.register_buffer('buffer', torch.zeros(max_delay, num_synapses))
+        self.register_buffer('ptr', torch.tensor(0))
+
+    def forward(self, spikes: torch.Tensor,
+                delays: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Store current spikes and retrieve delayed spikes.
+
+        Args:
+            spikes: Current spike pattern (num_synapses,) or (batch, num_synapses)
+            delays: Per-synapse delay in timesteps (num_synapses,).
+                   Integer values in [0, max_delay-1]. Defaults to max_delay-1.
+
+        Returns:
+            Delayed spikes, same shape as input
+        """
+        was_batched = spikes.dim() > 1
+        if was_batched:
+            # Use mean over batch for buffer storage
+            spikes_1d = spikes.mean(dim=0)
+        else:
+            spikes_1d = spikes
+
+        # Store current spikes
+        with torch.no_grad():
+            idx = self.ptr % self.max_delay
+            self.buffer[idx] = spikes_1d.detach()
+            self.ptr.add_(1)
+
+        # Retrieve delayed spikes
+        if delays is None:
+            delays = torch.full((self.num_synapses,), self.max_delay - 1,
+                                device=spikes.device, dtype=torch.long)
+        else:
+            delays = delays.long().clamp(0, self.max_delay - 1)
+
+        # Index into circular buffer: (ptr - 1 - delay) % max_delay
+        retrieve_idx = (self.ptr - 1 - delays) % self.max_delay
+        delayed = self.buffer[retrieve_idx, torch.arange(self.num_synapses, device=spikes.device)]
+
+        if was_batched:
+            delayed = delayed.unsqueeze(0).expand(spikes.shape[0], -1)
+
+        return delayed
+
+    def reset(self):
+        """Clear delay buffer."""
+        self.buffer.zero_()
+        self.ptr.zero_()
 
 
 if __name__ == '__main__':

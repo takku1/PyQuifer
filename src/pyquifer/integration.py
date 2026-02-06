@@ -86,6 +86,16 @@ class CycleConfig:
     volatility_max_lr: float = 0.1
     volatility_tonic: float = -4.0
 
+    # Phase 5 optional modules (set True to enable)
+    use_stp: bool = False           # Tsodyks-Markram short-term plasticity
+    use_mean_field: bool = False    # Kuramoto-Daido mean-field reduction
+    use_stuart_landau: bool = False # Stuart-Landau oscillator (amplitude+phase)
+    use_koopman: bool = False       # Koopman/DMD bifurcation detection
+    use_neural_mass: bool = False   # Wilson-Cowan E/I population dynamics
+
+    # Phase 6: Integration method (G-17)
+    integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
+
     @staticmethod
     def default():
         return CycleConfig()
@@ -135,6 +145,7 @@ class CognitiveCycle(nn.Module):
         self.oscillators = LearnableKuramotoBank(
             num_oscillators=c.num_oscillators,
             dt=c.oscillator_dt,
+            integration_method=c.integration_method,
         )
 
         from pyquifer.criticality import CriticalityController
@@ -231,6 +242,54 @@ class CognitiveCycle(nn.Module):
             tonic_volatility=c.volatility_tonic,
         )
 
+        # === Phase 5 Optional Modules ===
+        self._stp = None
+        self._mean_field = None
+        self._stuart_landau = None
+        self._koopman = None
+        self._neural_mass = None
+
+        if c.use_stp:
+            from pyquifer.short_term_plasticity import TsodyksMarkramSynapse
+            self._stp = TsodyksMarkramSynapse(num_synapses=c.hierarchy_dims[0])
+
+        if c.use_mean_field:
+            from pyquifer.oscillators import KuramotoDaidoMeanField
+            self._mean_field = KuramotoDaidoMeanField(
+                omega_mean=1.0,
+                delta=0.5,
+                coupling=1.0,
+                dt=c.oscillator_dt,
+            )
+
+        if c.use_stuart_landau:
+            from pyquifer.oscillators import StuartLandauOscillator
+            self._stuart_landau = StuartLandauOscillator(
+                num_oscillators=c.num_oscillators,
+                mu=0.1,  # Near criticality
+                coupling=1.0,
+                dt=c.oscillator_dt,
+                integration_method=c.integration_method,
+            )
+
+        if c.use_koopman:
+            from pyquifer.criticality import KoopmanBifurcationDetector
+            self._koopman = KoopmanBifurcationDetector(
+                state_dim=c.state_dim,
+                delay_dim=10,
+                rank=5,
+                compute_every=10,
+            )
+
+        if c.use_neural_mass:
+            from pyquifer.neural_mass import WilsonCowanNetwork
+            self._neural_mass = WilsonCowanNetwork(
+                num_populations=c.num_populations,
+                coupling_strength=0.5,
+                dt=0.1,
+                integration_method=c.integration_method,
+            )
+
         # === Projection layers (bridge mismatched dimensions) ===
         # Project oscillator phases to state_dim for various modules
         self.phase_to_state = nn.Linear(c.num_oscillators, c.state_dim, bias=False)
@@ -279,11 +338,41 @@ class CognitiveCycle(nn.Module):
         order_param = self.oscillators.get_order_parameter()
         coherence = order_param.item() if isinstance(order_param, torch.Tensor) else order_param
 
+        # ── Step 1b: Optional Stuart-Landau oscillator ──
+        stuart_landau_info = {}
+        if self._stuart_landau is not None:
+            sl_result = self._stuart_landau(steps=1)
+            stuart_landau_info = {
+                'amplitudes': sl_result['amplitudes'].detach(),
+                'sl_order_parameter': sl_result['order_parameter'].item(),
+                'criticality_distance_sl': self._stuart_landau.get_criticality_distance().item(),
+            }
+
+        # ── Step 1c: Optional Kuramoto-Daido mean-field ──
+        mean_field_info = {}
+        if self._mean_field is not None:
+            mf_result = self._mean_field(steps=1)
+            mean_field_info = {
+                'mf_R': mf_result['R'].item(),
+                'mf_Psi': mf_result['Psi'].item(),
+                'mf_synchronized': self._mean_field.is_synchronized(),
+            }
+
         # ── Step 2: Criticality check ──
         # Use oscillator phases as activity signal
         activity = torch.sin(phases)
         crit = self.criticality(activity)
         criticality_distance = crit['criticality_distance'].item()
+
+        # ── Step 2b: Optional Koopman bifurcation detection ──
+        koopman_info = {}
+        if self._koopman is not None:
+            koopman_result = self._koopman(sensory_input[0].detach())
+            koopman_info = {
+                'stability_margin': koopman_result['stability_margin'].item(),
+                'max_eigenvalue_mag': koopman_result['max_eigenvalue_mag'].item(),
+                'approaching_bifurcation': koopman_result['approaching_bifurcation'],
+            }
 
         # ── Step 3: Neuromodulation ──
         # Update neuromodulator levels based on current signals
@@ -306,6 +395,20 @@ class CognitiveCycle(nn.Module):
             criticality_distance=criticality_distance,
         )
         enhanced_input = sr_result['enhanced'].unsqueeze(0)
+
+        # ── Step 4b: Optional short-term plasticity ──
+        stp_info = {}
+        if self._stp is not None:
+            # Use enhanced_input magnitude as spike proxy
+            spike_proxy = (enhanced_input.squeeze(0).abs() > 0.5).float()
+            stp_result = self._stp(spike_proxy)
+            stp_info = {
+                'stp_psp': stp_result['psp'].detach(),
+                'mean_facilitation': stp_result['u'].mean().item(),
+                'mean_depression': stp_result['x'].mean().item(),
+            }
+            # Modulate enhanced input by STP output
+            enhanced_input = enhanced_input * stp_result['psp'].unsqueeze(0)
 
         # ── Step 5: Hierarchical Predictive Coding ──
         # Trim or pad input to match hierarchy bottom dimension
@@ -356,6 +459,19 @@ class CognitiveCycle(nn.Module):
         meta_result = self.metastability()
         dominant_state = meta_result['dominant'].item()
         coalition_entropy = meta_result['coalition_entropy'].item()
+
+        # ── Step 8b: Optional Wilson-Cowan neural mass ──
+        neural_mass_info = {}
+        if self._neural_mass is not None:
+            # Drive neural mass with oscillator coherence
+            ext_input = torch.ones(c.num_populations, device=device) * coherence
+            nm_result = self._neural_mass(steps=1, external_input=ext_input)
+            neural_mass_info = {
+                'E_states': nm_result['E_states'].detach(),
+                'I_states': nm_result['I_states'].detach(),
+                'nm_synchronization': nm_result['synchronization'].item(),
+                'nm_mean_E': nm_result['mean_E'].item(),
+            }
 
         # ── Step 9: Neural darwinism ──
         group_input = self.state_to_group(sensory_input[0])
@@ -456,6 +572,11 @@ class CognitiveCycle(nn.Module):
                 'precision': prec_result['precision'].detach(),
                 'resources': arena_result['resources'].detach(),
                 'neuromodulator_levels': levels.detach(),
+                **stuart_landau_info,
+                **mean_field_info,
+                **koopman_info,
+                **stp_info,
+                **neural_mass_info,
             },
         }
 
@@ -529,6 +650,18 @@ class CognitiveCycle(nn.Module):
         self.narrative.reset()
         self.stochastic_resonance.reset()
         self.volatility_gate.reset()
+
+        # Phase 5 optional modules
+        if self._stuart_landau is not None:
+            self._stuart_landau.reset()
+        if self._mean_field is not None:
+            self._mean_field.reset()
+        if self._koopman is not None:
+            self._koopman.reset()
+        if self._stp is not None:
+            self._stp.reset()
+        if self._neural_mass is not None:
+            self._neural_mass.reset()
 
 
 if __name__ == '__main__':

@@ -26,6 +26,68 @@ import math
 from typing import Optional, Dict
 
 
+class OrnsteinUhlenbeckNoise(nn.Module):
+    """
+    Ornstein-Uhlenbeck colored noise process.
+
+    dx = -x/tau * dt + sigma * sqrt(2/tau) * dW
+
+    Produces temporally correlated noise with autocorrelation time tau.
+    More biologically realistic than white Gaussian noise — neural noise
+    is bandpass-filtered by membrane dynamics.
+
+    Args:
+        dim: Noise dimension
+        tau: Autocorrelation time constant (higher = more correlated)
+        sigma: Noise intensity (steady-state std)
+        dt: Integration timestep
+    """
+
+    def __init__(self,
+                 dim: int,
+                 tau: float = 10.0,
+                 sigma: float = 1.0,
+                 dt: float = 1.0):
+        super().__init__()
+        self.dim = dim
+        self.tau = tau
+        self.sigma = sigma
+        self.dt = dt
+
+        # OU state
+        self.register_buffer('state', torch.zeros(dim))
+
+    def forward(self, like: torch.Tensor = None) -> torch.Tensor:
+        """
+        Generate one step of OU noise.
+
+        Args:
+            like: Optional tensor to match shape/device of.
+                  If provided, generates noise matching its shape.
+
+        Returns:
+            OU noise sample
+        """
+        if like is not None and like.shape != self.state.shape:
+            # Reshape state to match (broadcast-safe)
+            with torch.no_grad():
+                self.state = torch.zeros(like.shape[-self.state.dim():],
+                                         device=like.device)
+
+        with torch.no_grad():
+            # Euler-Maruyama integration of OU process
+            drift = -self.state / self.tau * self.dt
+            diffusion = self.sigma * math.sqrt(2.0 / self.tau * self.dt)
+            dW = torch.randn_like(self.state)
+            self.state.add_(drift + diffusion * dW)
+
+        return self.state.clone()
+
+    def reset(self):
+        """Reset OU state to zero."""
+        self.state.zero_()
+
+
 class AdaptiveStochasticResonance(nn.Module):
     """
     Finds and tracks the optimal noise level for signal detection.
@@ -42,7 +104,8 @@ class AdaptiveStochasticResonance(nn.Module):
                  adaptation_rate: float = 0.01,
                  perturbation_delta: float = 0.05,
                  min_noise: float = 0.01,
-                 max_noise: float = 2.0):
+                 max_noise: float = 2.0,
+                 noise_type: str = 'white'):
         """
         Args:
             dim: Signal dimension
@@ -52,6 +115,8 @@ class AdaptiveStochasticResonance(nn.Module):
             perturbation_delta: Size of probe perturbations
             min_noise: Minimum noise level
             max_noise: Maximum noise level
+            noise_type: 'white' for Gaussian white noise, 'ou' for
+                       Ornstein-Uhlenbeck colored noise
         """
         super().__init__()
         self.dim = dim
@@ -60,6 +125,7 @@ class AdaptiveStochasticResonance(nn.Module):
         self.perturbation_delta = perturbation_delta
         self.min_noise = min_noise
         self.max_noise = max_noise
+        self.noise_type = noise_type
 
         # Current noise level (adapted by SR dynamics, not backprop)
         self.register_buffer('noise_level', torch.tensor(initial_noise))
@@ -71,9 +137,21 @@ class AdaptiveStochasticResonance(nn.Module):
         self.register_buffer('snr_history', torch.zeros(100))
         self.register_buffer('noise_history', torch.zeros(100))
 
+        # OU noise source (used when noise_type='ou')
+        if noise_type == 'ou':
+            self.ou_noise = OrnsteinUhlenbeckNoise(dim=dim, tau=10.0, sigma=1.0)
+
+    def _generate_noise(self, signal: torch.Tensor, noise_level: float) -> torch.Tensor:
+        """Generate noise using the configured noise type."""
+        if self.noise_type == 'ou' and hasattr(self, 'ou_noise'):
+            raw = self.ou_noise(like=signal)
+            return raw * noise_level
+        else:
+            return torch.randn_like(signal) * noise_level
+
     def _detect(self, signal: torch.Tensor, noise_level: float) -> torch.Tensor:
         """Apply SR detection at a given noise level."""
-        noise = torch.randn_like(signal) * noise_level
+        noise = self._generate_noise(signal, noise_level)
         noisy = signal + noise
         detected = (noisy.abs() > self.threshold).float()
         return signal * detected
@@ -95,13 +173,13 @@ class AdaptiveStochasticResonance(nn.Module):
 
         for _ in range(num_trials):
             # Hit: detection with signal present
-            noise = torch.randn_like(signal) * noise_level
+            noise = self._generate_noise(signal, noise_level)
             noisy_signal = signal + noise
             hits = (noisy_signal.abs() > self.threshold).float()
             hit_rates.append(hits.mean().item())
 
             # False alarm: detection with no signal (just noise)
-            noise_only = torch.randn_like(signal) * noise_level
+            noise_only = self._generate_noise(signal, noise_level)
             false_alarms = (noise_only.abs() > self.threshold).float()
             false_alarm_rates.append(false_alarms.mean().item())
 
@@ -177,7 +255,7 @@ class AdaptiveStochasticResonance(nn.Module):
             self.step_count.add_(1)
 
         # Apply SR at current optimal noise level
-        noise = torch.randn_like(signal) * self.noise_level
+        noise = self._generate_noise(signal, self.noise_level.item())
         noisy_signal = signal + noise
         detected = (noisy_signal.abs() > self.threshold).float()
         enhanced = signal * detected
