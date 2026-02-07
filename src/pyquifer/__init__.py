@@ -305,6 +305,12 @@ __all__ = [
     "SpikeEncoder",
     "SpikeDecoder",
     "SynapticDelay",
+    # Phase 7: Benchmark gap-closure
+    "PhaseTopologyCache",
+    "NoProgressDetector",
+    "EvidenceSource",
+    "EvidenceAggregator",
+    "HypothesisProfile",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -649,6 +655,13 @@ _LAZY_IMPORTS = {
     "SpikeEncoder": (".spiking", "SpikeEncoder"),
     "SpikeDecoder": (".spiking", "SpikeDecoder"),
     "SynapticDelay": (".spiking", "SynapticDelay"),
+
+    # Phase 7: Benchmark gap-closure
+    "PhaseTopologyCache": (".oscillators", "PhaseTopologyCache"),
+    "NoProgressDetector": (".criticality", "NoProgressDetector"),
+    "EvidenceSource": (".metacognitive", "EvidenceSource"),
+    "EvidenceAggregator": (".metacognitive", "EvidenceAggregator"),
+    "HypothesisProfile": (".neural_darwinism", "HypothesisProfile"),
 }
 
 # Cache for loaded attributes

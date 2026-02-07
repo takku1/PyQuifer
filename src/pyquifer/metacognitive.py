@@ -168,6 +168,120 @@ class ConfidenceEstimator(nn.Module):
         return total_error / max(1, total_samples)
 
 
+@dataclass
+class EvidenceSource:
+    """A named piece of evidence with strength and direction."""
+    name: str
+    value: float        # 0-1 strength
+    supports: str       # Which hypothesis this supports
+    reasoning_type: str = "deduction"  # "deduction", "induction", etc.
+
+
+class EvidenceAggregator:
+    """
+    Aggregates multiple evidence sources into calibrated confidence.
+
+    Plain class (not nn.Module) — matching ReasoningMonitor pattern.
+    """
+
+    def __init__(self):
+        self.sources: List[EvidenceSource] = []
+
+    def add_evidence(self, source: EvidenceSource):
+        """Add an evidence source."""
+        self.sources.append(source)
+
+    def clear(self):
+        """Remove all evidence."""
+        self.sources.clear()
+
+    def get_confidence(self, hypothesis: str) -> float:
+        """Weighted confidence for a hypothesis based on all evidence.
+
+        Pure emergence: confidence = fraction of total weighted evidence
+        that supports this hypothesis. No artificial scaling — more
+        independent sources naturally produce higher confidence.
+        """
+        if not self.sources:
+            return 0.5
+
+        # Type-based weight multiplier
+        type_weights = {
+            "deduction": 1.0,
+            "retrieval": 0.9,
+            "induction": 0.7,
+            "analogy": 0.6,
+            "speculation": 0.3,
+        }
+
+        # All sources contribute to the denominator — emergence
+        total_weighted = 0.0
+        hypothesis_weighted = 0.0
+        for s in self.sources:
+            w = type_weights.get(s.reasoning_type, 0.5)
+            contribution = s.value * w
+            total_weighted += contribution
+            if s.supports == hypothesis:
+                hypothesis_weighted += contribution
+
+        if total_weighted < 1e-8:
+            return 0.5
+
+        # Confidence naturally emerges: weighted support / total weighted evidence
+        return hypothesis_weighted / total_weighted
+
+    def get_agreement(self) -> float:
+        """0-1 score: do all sources agree on the same hypothesis?"""
+        if not self.sources:
+            return 0.0
+
+        # Count votes per hypothesis
+        votes: Dict[str, float] = {}
+        for s in self.sources:
+            votes[s.supports] = votes.get(s.supports, 0.0) + s.value
+
+        if not votes:
+            return 0.0
+
+        total = sum(votes.values())
+        if total < 1e-8:
+            return 0.0
+
+        # Entropy-based: 1 - normalized entropy
+        probs = [v / total for v in votes.values()]
+        n_hypotheses = len(probs)
+        if n_hypotheses <= 1:
+            return 1.0
+
+        entropy = -sum(p * math.log(p + 1e-10) for p in probs)
+        max_entropy = math.log(n_hypotheses)
+        return 1.0 - (entropy / max_entropy) if max_entropy > 0 else 1.0
+
+    def get_coverage(self) -> float:
+        """Fraction of sources that have contributed non-zero evidence."""
+        if not self.sources:
+            return 0.0
+        with_value = sum(1 for s in self.sources if s.value > 0.0)
+        return with_value / len(self.sources)
+
+    def summarize(self) -> Dict[str, Any]:
+        """Full evidence summary with per-source breakdown."""
+        hypotheses = set(s.supports for s in self.sources)
+        per_hypothesis = {}
+        for h in hypotheses:
+            per_hypothesis[h] = {
+                'confidence': self.get_confidence(h),
+                'sources': [{'name': s.name, 'value': s.value, 'type': s.reasoning_type}
+                            for s in self.sources if s.supports == h],
+            }
+        return {
+            'agreement': self.get_agreement(),
+            'coverage': self.get_coverage(),
+            'num_sources': len(self.sources),
+            'hypotheses': per_hypothesis,
+        }
+
+
 class ReasoningMonitor:
     """
     Monitors the reasoning process and detects issues.
@@ -252,6 +366,18 @@ class ReasoningMonitor:
             "avg_confidence": sum(confidences) / len(confidences) if confidences else 0,
             "confidence_trend": "declining" if len(confidences) >= 2 and confidences[-1] < confidences[0] - 0.2 else "stable",
         }
+
+    def analyze_chain_with_evidence(
+        self, aggregator: 'EvidenceAggregator'
+    ) -> Dict[str, Any]:
+        """Extended analysis including evidence quality metrics."""
+        base = self.analyze_chain()
+        summary = aggregator.summarize()
+        base['evidence_agreement'] = summary['agreement']
+        base['evidence_coverage'] = summary['coverage']
+        base['evidence_num_sources'] = summary['num_sources']
+        base['evidence_hypotheses'] = summary['hypotheses']
+        return base
 
 
 class MetacognitiveLoop(nn.Module):

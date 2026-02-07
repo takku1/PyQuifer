@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 
 def _rk4_step(f, y, dt):
@@ -361,6 +361,80 @@ class LearnableKuramotoBank(nn.Module):
         # Update internal state
         self.phases.data = phases.detach()
         return phases
+
+    def compute_attractor_stability(
+        self,
+        perturbation_scale: float = 0.1,
+        n_trials: int = 10,
+        recovery_steps: int = 20,
+        external_input: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Measure attractor basin stability via perturbation analysis.
+
+        Saves current phases, perturbs them, runs recovery_steps,
+        measures final R vs original R, restores original phases.
+
+        Args:
+            perturbation_scale: Gaussian noise scale (fraction of 2*pi)
+            n_trials: Number of perturbation trials
+            recovery_steps: Steps to run after each perturbation
+            external_input: Optional external driving force
+
+        Returns:
+            stability_index: 0-1 (1 = perfectly stable attractor)
+            escape_probability: fraction of trials where R dropped >50%
+            mean_recovery_R: average R after recovery
+            R_variance: variance of recovered R across trials
+        """
+        with torch.no_grad():
+            # Save current state
+            original_phases = self.phases.clone()
+            original_prev = self.prev_phases.clone()
+            original_var = self.phase_velocity_var.clone()
+            original_precision = self.precision.clone()
+            original_R = self.get_order_parameter().item()
+
+            recovered_Rs = []
+            escapes = 0
+
+            for _ in range(n_trials):
+                # Perturb phases
+                noise = torch.randn_like(self.phases) * perturbation_scale * 2 * math.pi
+                self.phases.copy_((original_phases + noise) % (2 * math.pi))
+                self.prev_phases.copy_(self.phases)
+
+                # Run recovery
+                for __ in range(recovery_steps):
+                    self.forward(external_input=external_input, steps=1)
+
+                trial_R = self.get_order_parameter().item()
+                recovered_Rs.append(trial_R)
+
+                if original_R > 1e-6 and trial_R < original_R * 0.5:
+                    escapes += 1
+
+                # Restore for next trial
+                self.phases.copy_(original_phases)
+                self.prev_phases.copy_(original_prev)
+                self.phase_velocity_var.copy_(original_var)
+                self.precision.copy_(original_precision)
+
+            Rs = torch.tensor(recovered_Rs)
+            mean_R = Rs.mean()
+            R_var = Rs.var()
+            escape_prob = escapes / n_trials
+
+            stability_index = torch.clamp(
+                1.0 - R_var - torch.tensor(escape_prob), min=0.0, max=1.0
+            )
+
+        return {
+            'stability_index': stability_index,
+            'escape_probability': torch.tensor(escape_prob),
+            'mean_recovery_R': mean_R,
+            'R_variance': R_var,
+        }
 
     def get_order_parameter(self, phases: torch.Tensor = None) -> torch.Tensor:
         """
@@ -769,6 +843,111 @@ class KuramotoDaidoMeanField(nn.Module):
         self.Z_real.fill_(0.1)
         self.Z_imag.fill_(0.0)
         self.step_count.zero_()
+
+
+class PhaseTopologyCache:
+    """
+    Cache for phase topology patterns with outcome labels.
+
+    Stores hashes of relative phase patterns (rotation-invariant)
+    with observed outcome classes. Acts as a Bayesian prior for
+    confidence estimation — NOT a lookup table.
+
+    Plain class (not nn.Module) — no learnable parameters.
+
+    Args:
+        capacity: Maximum number of cached entries
+        hash_bins: Number of quantization bins for phase differences
+    """
+
+    def __init__(self, capacity: int = 1000, hash_bins: int = 64):
+        self.capacity = capacity
+        self.hash_bins = hash_bins
+        self._store: Dict[int, Dict] = {}  # hash -> {outcome, confidence, count}
+        self._access_order: List[int] = []  # LRU eviction
+
+    def compute_hash(self, phases: torch.Tensor) -> int:
+        """
+        Rotation-invariant hash of relative phase pattern.
+
+        Sorts phase differences (removes rotation ambiguity),
+        quantizes into bins, then hashes.
+        """
+        with torch.no_grad():
+            # Compute pairwise phase differences (rotation-invariant)
+            diffs = (phases.unsqueeze(0) - phases.unsqueeze(1)) % (2 * math.pi)
+            # Take upper triangle to avoid redundancy
+            n = phases.shape[0]
+            upper_diffs = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    upper_diffs.append(diffs[i, j].item())
+            if not upper_diffs:
+                return 0
+            # Sort for permutation invariance
+            upper_diffs.sort()
+            # Quantize into bins
+            binned = tuple(
+                int(d / (2 * math.pi) * self.hash_bins) % self.hash_bins
+                for d in upper_diffs
+            )
+            return hash(binned)
+
+    def store(self, phases: torch.Tensor, outcome: str, confidence: float):
+        """Store an observed outcome for a phase topology."""
+        h = self.compute_hash(phases)
+
+        if h in self._store:
+            entry = self._store[h]
+            # Bayesian update: weighted running average
+            old_count = entry['count']
+            entry['confidence'] = (entry['confidence'] * old_count + confidence) / (old_count + 1)
+            entry['count'] += 1
+            # If outcome differs, keep the majority
+            if outcome != entry['outcome'] and confidence > entry['confidence']:
+                entry['outcome'] = outcome
+        else:
+            # Evict if at capacity
+            if len(self._store) >= self.capacity:
+                oldest = self._access_order.pop(0)
+                self._store.pop(oldest, None)
+            self._store[h] = {'outcome': outcome, 'confidence': confidence, 'count': 1}
+
+        # Update access order
+        if h in self._access_order:
+            self._access_order.remove(h)
+        self._access_order.append(h)
+
+    def query(self, phases: torch.Tensor) -> Optional[Dict]:
+        """Returns {outcome, confidence, count} if similar pattern seen, else None."""
+        h = self.compute_hash(phases)
+        entry = self._store.get(h)
+        if entry is not None:
+            # Update LRU
+            if h in self._access_order:
+                self._access_order.remove(h)
+            self._access_order.append(h)
+            return dict(entry)
+        return None
+
+    def get_prior(self, phases: torch.Tensor, hypothesis: str) -> float:
+        """
+        Bayesian prior: P(hypothesis | similar_topology_seen_before).
+
+        Returns stored confidence weighted by count if hash matches
+        and outcome matches hypothesis; else 0.5 (uninformative).
+        """
+        entry = self.query(phases)
+        if entry is None:
+            return 0.5
+        if entry['outcome'] == hypothesis:
+            # Confidence grows with evidence: cap at 0.95
+            count_weight = min(1.0, entry['count'] / 10.0)
+            return 0.5 + (entry['confidence'] - 0.5) * count_weight
+        else:
+            # Evidence against this hypothesis
+            count_weight = min(1.0, entry['count'] / 10.0)
+            return 0.5 - (entry['confidence'] - 0.5) * count_weight * 0.5
 
 
 if __name__ == '__main__':

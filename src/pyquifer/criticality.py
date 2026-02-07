@@ -261,6 +261,106 @@ class BranchingRatio(nn.Module):
         self.history_ptr.zero_()
 
 
+class NoProgressDetector(nn.Module):
+    """
+    Detects stagnation: no monotonic improvement over a window.
+
+    Fortress signature: activity exists but goes nowhere.
+    sigma ~= 1 (critical) + zero progress = locked position.
+
+    Uses the same circular-buffer pattern as BranchingRatio.
+
+    Args:
+        window_size: Number of steps to track
+        progress_threshold: Slope below this magnitude counts as stalled
+    """
+
+    def __init__(self, window_size: int = 30, progress_threshold: float = 0.01):
+        super().__init__()
+        self.window_size = window_size
+        self.progress_threshold = progress_threshold
+
+        self.register_buffer('history', torch.zeros(window_size))
+        self.register_buffer('hist_ptr', torch.tensor(0))
+        self.register_buffer('stagnation_count', torch.tensor(0))
+
+    def forward(self, evaluation: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Record an evaluation and detect stagnation.
+
+        Args:
+            evaluation: Scalar evaluation (or tensor that will be meaned)
+
+        Returns:
+            progress_stalled: bool — no improvement for window_size steps
+            stagnation_duration: int — how many steps with no progress
+            trend: float — slope of evaluation over window (-/0/+)
+            entropy_change: float — change in evaluation entropy
+        """
+        if evaluation.numel() > 1:
+            evaluation = evaluation.mean()
+
+        dev = evaluation.device
+
+        with torch.no_grad():
+            self.history[self.hist_ptr % self.window_size] = evaluation.detach()
+            self.hist_ptr.add_(1)
+
+        n_valid = min(self.hist_ptr.item(), self.window_size)
+
+        if n_valid < 3:
+            return {
+                'progress_stalled': torch.tensor(False, device=dev),
+                'stagnation_duration': torch.tensor(0, device=dev),
+                'trend': torch.tensor(0.0, device=dev),
+                'entropy_change': torch.tensor(0.0, device=dev),
+            }
+
+        # Get valid history in chronological order
+        if self.hist_ptr.item() <= self.window_size:
+            valid = self.history[:n_valid]
+        else:
+            # Circular buffer: reorder chronologically
+            ptr = self.hist_ptr.item() % self.window_size
+            valid = torch.cat([self.history[ptr:], self.history[:ptr]])[-n_valid:]
+
+        # Linear regression slope over window
+        x = torch.arange(n_valid, dtype=torch.float32, device=dev)
+        x_mean = x.mean()
+        y_mean = valid.mean()
+        slope = ((x - x_mean) * (valid - y_mean)).sum() / ((x - x_mean).pow(2).sum() + 1e-8)
+
+        # Entropy change: std of recent half vs older half
+        half = n_valid // 2
+        if half >= 2:
+            older_std = valid[:half].std()
+            recent_std = valid[half:].std()
+            entropy_change = recent_std - older_std
+        else:
+            entropy_change = torch.tensor(0.0, device=dev)
+
+        stalled = torch.abs(slope) < self.progress_threshold
+
+        with torch.no_grad():
+            if stalled:
+                self.stagnation_count.add_(1)
+            else:
+                self.stagnation_count.zero_()
+
+        return {
+            'progress_stalled': stalled,
+            'stagnation_duration': self.stagnation_count.clone(),
+            'trend': slope,
+            'entropy_change': entropy_change,
+        }
+
+    def reset(self):
+        """Reset history."""
+        self.history.zero_()
+        self.hist_ptr.zero_()
+        self.stagnation_count.zero_()
+
+
 class CriticalityController(nn.Module):
     """
     Adaptive controller that maintains the system at criticality.

@@ -93,6 +93,13 @@ class CycleConfig:
     use_koopman: bool = False       # Koopman/DMD bifurcation detection
     use_neural_mass: bool = False   # Wilson-Cowan E/I population dynamics
 
+    # Phase 7: Benchmark gap-closure features
+    use_attractor_stability: bool = False   # Kuramoto ASI perturbation analysis
+    use_hypothesis_arena: bool = False      # Evidence-driven hypothesis competition
+    use_evidence_aggregator: bool = False   # Calibrated confidence from evidence
+    use_no_progress: bool = False           # Stagnation detection
+    use_phase_cache: bool = False           # Phase topology Bayesian prior
+
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
@@ -289,6 +296,23 @@ class CognitiveCycle(nn.Module):
                 dt=0.1,
                 integration_method=c.integration_method,
             )
+
+        # === Phase 7 Optional Modules ===
+        self._no_progress = None
+        self._evidence_aggregator = None
+        self._phase_cache = None
+
+        if c.use_no_progress:
+            from pyquifer.criticality import NoProgressDetector
+            self._no_progress = NoProgressDetector(window_size=30)
+
+        if c.use_evidence_aggregator:
+            from pyquifer.metacognitive import EvidenceAggregator
+            self._evidence_aggregator = EvidenceAggregator()
+
+        if c.use_phase_cache:
+            from pyquifer.oscillators import PhaseTopologyCache
+            self._phase_cache = PhaseTopologyCache(capacity=1000)
 
         # === Projection layers (bridge mismatched dimensions) ===
         # Project oscillator phases to state_dim for various modules
@@ -514,6 +538,28 @@ class CognitiveCycle(nn.Module):
                     'num_traces': cons['num_traces'].item() if isinstance(cons['num_traces'], torch.Tensor) else cons['num_traces'],
                 }
 
+        # ── Step 12b: Phase 7 optional modules ──
+        phase7_info = {}
+        if self._no_progress is not None:
+            np_result = self._no_progress(free_energy)
+            phase7_info['progress_stalled'] = np_result['progress_stalled'].item() if isinstance(np_result['progress_stalled'], torch.Tensor) else np_result['progress_stalled']
+            phase7_info['stagnation_duration'] = np_result['stagnation_duration'].item() if isinstance(np_result['stagnation_duration'], torch.Tensor) else np_result['stagnation_duration']
+            phase7_info['trend'] = np_result['trend'].item() if isinstance(np_result['trend'], torch.Tensor) else np_result['trend']
+
+        if self.config.use_attractor_stability and self.tick_count.item() % 50 == 0:
+            asi = self.oscillators.compute_attractor_stability(n_trials=5, recovery_steps=10)
+            phase7_info['attractor_stability'] = asi['stability_index'].item()
+            phase7_info['escape_probability'] = asi['escape_probability'].item()
+
+        if self._phase_cache is not None:
+            cached = self._phase_cache.query(self.oscillators.phases)
+            if cached is not None:
+                phase7_info['phase_cache_hit'] = True
+                phase7_info['phase_cache_outcome'] = cached['outcome']
+                phase7_info['phase_cache_confidence'] = cached['confidence']
+            else:
+                phase7_info['phase_cache_hit'] = False
+
         # ── Step 13: Tick counter ──
         with torch.no_grad():
             self.tick_count.add_(1)
@@ -576,6 +622,7 @@ class CognitiveCycle(nn.Module):
                 **koopman_info,
                 **stp_info,
                 **neural_mass_info,
+                **phase7_info,
             },
         }
 
@@ -661,6 +708,13 @@ class CognitiveCycle(nn.Module):
             self._stp.reset()
         if self._neural_mass is not None:
             self._neural_mass.reset()
+
+        # Phase 7 optional modules
+        if self._no_progress is not None:
+            self._no_progress.reset()
+        if self._evidence_aggregator is not None:
+            self._evidence_aggregator.clear()
+        # Phase cache is not reset (accumulated knowledge persists)
 
 
 if __name__ == '__main__':

@@ -22,7 +22,17 @@ References:
 import torch
 import torch.nn as nn
 import math
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
+
+
+@dataclass
+class HypothesisProfile:
+    """Named hypothesis with evidence mapping for SelectionArena."""
+    name: str
+    group_indices: List[int]  # Which arena groups represent this hypothesis
+    evidence_keys: List[str]  # Which evidence sources support this
+    base_weight: float = 1.0  # Prior strength
 
 
 class NeuronalGroup(nn.Module):
@@ -269,6 +279,87 @@ class SelectionArena(nn.Module):
             'mean_fitness': fitnesses.mean(),
             'fitness_variance': fitnesses.var(),
         }
+
+    def set_hypotheses(self, profiles: List[HypothesisProfile]):
+        """
+        Assign groups to named hypotheses and generate orthogonal basis vectors.
+
+        Each hypothesis gets a coherence target where its groups are activated
+        and other groups are suppressed (-0.1). This mirrors the benchmark's
+        _build_coherence_target() logic but lives in the library.
+        """
+        self._hypothesis_profiles = profiles
+        self._hypothesis_targets: Dict[str, torch.Tensor] = {}
+
+        for profile in profiles:
+            target = torch.full((self.group_dim,), -0.1)
+            # Each hypothesis's groups get a slice of the vector space
+            n_indices = len(profile.group_indices)
+            if n_indices == 0:
+                continue
+            slice_size = self.group_dim // max(1, len(profiles))
+            start = profiles.index(profile) * slice_size
+            end = start + slice_size
+            target[start:end] = profile.base_weight
+            self._hypothesis_targets[profile.name] = target
+
+    def inject_evidence(self, evidence: Dict[str, float]) -> torch.Tensor:
+        """
+        Convert evidence dict into coherence target using hypothesis profiles.
+
+        Builds a combined coherence vector where each hypothesis's region
+        is activated proportionally to its evidence weight. The strongest
+        hypothesis dominates, while weaker ones get slight suppression.
+
+        Args:
+            evidence: Dict mapping evidence_key -> strength (float)
+
+        Returns:
+            Coherence target tensor (group_dim,)
+        """
+        if not hasattr(self, '_hypothesis_profiles') or not self._hypothesis_profiles:
+            # Backward-compatible: return zeros
+            return torch.zeros(self.group_dim)
+
+        n_profiles = len(self._hypothesis_profiles)
+        slice_size = self.group_dim // max(1, n_profiles)
+
+        # Compute per-hypothesis evidence weight
+        hypothesis_weights: Dict[str, float] = {}
+        for profile in self._hypothesis_profiles:
+            weight = profile.base_weight
+            for key in profile.evidence_keys:
+                if key in evidence:
+                    weight += evidence[key]
+            hypothesis_weights[profile.name] = weight
+
+        # Build combined target: each hypothesis region gets its weight,
+        # weaker regions get -0.1 suppression relative to the winner
+        target = torch.full((self.group_dim,), -0.1)
+        for i, profile in enumerate(self._hypothesis_profiles):
+            start = i * slice_size
+            end = start + slice_size
+            target[start:end] = hypothesis_weights[profile.name]
+
+        return target
+
+    def get_hypothesis_strengths(self) -> Dict[str, float]:
+        """
+        Return resource totals per hypothesis (not per group).
+
+        Aggregates group resources by hypothesis name.
+        """
+        if not hasattr(self, '_hypothesis_profiles') or not self._hypothesis_profiles:
+            return {}
+
+        strengths: Dict[str, float] = {}
+        for profile in self._hypothesis_profiles:
+            total = 0.0
+            for idx in profile.group_indices:
+                if 0 <= idx < self.num_groups:
+                    total += self.groups[idx].resources.item()
+            strengths[profile.name] = total
+        return strengths
 
     def reset(self):
         """Reset all groups to equal resources."""
