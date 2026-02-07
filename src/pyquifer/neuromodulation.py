@@ -324,7 +324,7 @@ class StochasticResonance(nn.Module):
             noise_power = ((enhanced - signal * detected) ** 2).mean() + 1e-8
             snrs.append((signal_power / noise_power).item())
 
-        return torch.tensor(snrs)
+        return torch.tensor(snrs, device=signal.device)
 
 
 class InjectionLocking(nn.Module):

@@ -3,6 +3,9 @@ import torch.nn as nn
 from typing import List, Dict, Any, Optional
 
 from .oscillators import LearnableKuramotoBank
+import logging
+
+logger = logging.getLogger(__name__)
 
 class FrequencyBank(nn.Module):
     """
@@ -45,7 +48,7 @@ class FrequencyBank(nn.Module):
                 initial_phase_range=initial_phase_range
             )
             self.banks.append(bank)
-            print(f"FrequencyBank: Initialized bank {i+1} with {num_oscillators} oscillators, dt={dt}.")
+            logger.info(f"FrequencyBank: Initialized bank {i+1} with {num_oscillators} oscillators, dt={dt}.")
 
     def forward(self, external_inputs: Optional[List[torch.Tensor]] = None, steps: int = 1):
         """
@@ -88,7 +91,7 @@ class FrequencyBank(nn.Module):
     def get_aggregated_order_parameter(self) -> torch.Tensor:
         """
         Calculates an aggregated order parameter across all banks.
-        Returns a tensor to preserve gradient flow.
+        Returns a tensor (diagnostic; oscillator state is detached by design).
         """
         all_rs = self.get_all_order_parameters()
         if not all_rs:

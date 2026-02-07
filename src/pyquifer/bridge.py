@@ -277,9 +277,9 @@ class PyQuiferBridge(nn.Module):
         # Detached — oscillator state is read-only
         coherence = state.coherence
         if state.neuromodulator_levels is not None:
-            nm_gain = state.neuromodulator_levels.mean().item()
+            nm_gain = state.neuromodulator_levels.mean()
         else:
-            nm_gain = 0.5
+            nm_gain = torch.tensor(0.5, device=device)
         amplitude = coherence * nm_gain * 0.1  # Scale factor to keep perturbation small
 
         # Phase contribution: sin(phases) as a modulation signal
@@ -301,8 +301,8 @@ class PyQuiferBridge(nn.Module):
             else:
                 blended_trait = blended_trait[:hidden_dim]
 
-        # Average phase signal to scalar modulation
-        phase_mod = phase_signal.mean().item()
+        # Average phase signal to scalar modulation (stays on-device)
+        phase_mod = phase_signal.mean()
 
         # The coupling equation:
         # Modified = Original + amplitude * sin(mean_phase) * trait_vector

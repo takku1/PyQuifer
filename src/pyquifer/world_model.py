@@ -176,6 +176,12 @@ class RSSM(nn.Module):
     - Stochastic posterior: q(s_t | h_t, o_t)
 
     Full latent state: z_t = [h_t, s_t]
+
+    **Training required.** RSSM weights are randomly initialized and must
+    be trained via an external training loop. Use ``WorldModel.loss()``
+    to compute the combined reconstruction + KL loss, then call
+    ``.backward()`` and step an optimizer. Without training, imagine_step()
+    outputs are random projections of the prior network.
     """
 
     def __init__(self,
@@ -452,6 +458,20 @@ class WorldModel(nn.Module):
 
     Supports both training from experience and
     imagination for planning.
+
+    **Training required.** All sub-networks (RSSM, decoders) are randomly
+    initialized. Call ``loss(obs_seq, action_seq, reward_seq)`` to get
+    the combined training loss, then ``.backward()`` + optimizer step::
+
+        optimizer = torch.optim.Adam(world_model.parameters(), lr=3e-4)
+        for batch in dataloader:
+            losses = world_model.loss(batch.obs, batch.actions, batch.rewards)
+            optimizer.zero_grad()
+            losses['total'].backward()
+            optimizer.step()
+
+    Without training, imagine() and observe() produce random latent
+    trajectories and the reward/observation decoders output noise.
     """
 
     def __init__(self,

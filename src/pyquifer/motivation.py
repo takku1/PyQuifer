@@ -166,7 +166,7 @@ class NoveltyDetector(nn.Module):
                     self.memory[idx] = x[i]
                 self.memory_ptr = (self.memory_ptr + batch_size) % self.memory_size
                 if self.memory_ptr < batch_size:
-                    self.memory_filled = torch.tensor(True, device=x.device)
+                    self.memory_filled.fill_(True)
 
         return novelty, prediction_error
 
@@ -291,7 +291,7 @@ class MasterySignal(nn.Module):
             self.performance_history[self.history_ptr] = current_performance
             self.history_ptr = (self.history_ptr + 1) % self.window_size
             if self.history_ptr == 0:
-                self.history_filled = torch.tensor(True, device=current_performance.device)
+                self.history_filled.fill_(True)
 
         return signals
 
@@ -350,8 +350,8 @@ class CoherenceReward(nn.Module):
             - understanding: Current level of coherent understanding
             - confusion: Signal when coherence is lost (can drive exploration)
         """
-        if isinstance(order_parameter, float):
-            order_parameter = torch.tensor(order_parameter)
+        if isinstance(order_parameter, (int, float)):
+            order_parameter = torch.tensor(order_parameter, device=self.coherence_history.device)
 
         signals = {}
 

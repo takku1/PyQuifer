@@ -329,7 +329,7 @@ class ResonanceMonitor(nn.Module):
         valid_snr = self.snr_history[:n_valid]
 
         noise_mean = valid_noise.mean()
-        noise_std = valid_noise.std() if n_valid > 1 else torch.tensor(0.0)
+        noise_std = valid_noise.std() if n_valid > 1 else torch.tensor(0.0, device=valid_noise.device)
         snr_mean = valid_snr.mean()
 
         # Regime shift detection: recent noise level deviates from running mean
@@ -346,7 +346,7 @@ class ResonanceMonitor(nn.Module):
             'noise_mean': noise_mean,
             'noise_std': noise_std,
             'snr_mean': snr_mean,
-            'regime_shift': torch.tensor(regime_shift),
+            'regime_shift': torch.tensor(regime_shift, device=valid_noise.device),
         }
 
     def reset(self):

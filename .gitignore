@@ -51,3 +51,23 @@ Thumbs.db
 *.log
 .env
 .env.local
+
+# Third-party benchmark repos (cloned for comparison, not ours)
+tests/benchmarks/EGG/
+tests/benchmarks/Gymnasium/
+tests/benchmarks/KuraNet/
+tests/benchmarks/MD-Bench/
+tests/benchmarks/PredBench/
+tests/benchmarks/SciMLBenchmarks.jl/
+tests/benchmarks/Torch2PC/
+tests/benchmarks/bifurcation/
+tests/benchmarks/emergent_communication_at_scale/
+tests/benchmarks/hanabi-learning-environment/
+tests/benchmarks/lava/
+tests/benchmarks/meltingpot/
+tests/benchmarks/neurobench/
+tests/benchmarks/neurodiscoverybench/
+tests/benchmarks/nlb_tools/
+tests/benchmarks/open_spiel/
+tests/benchmarks/torchdiffeq/
+tests/benchmarks/torchdyn/

@@ -254,11 +254,10 @@ class IntrinsicPlasticity(nn.Module):
                 da = self.eta * (1/self.a + x_mean - (2*sigma_sq + self.mu)*xy_mean - self.mu*xy2_mean)
                 db = self.eta * (1 - (2*sigma_sq + self.mu)*y_mean - self.mu*y2_mean)
 
-                self.a.data += da
-                self.b.data += db
-
-                # Keep gain positive
-                self.a.data = self.a.data.clamp(min=0.1)
+                with torch.no_grad():
+                    self.a.add_(da)
+                    self.b.add_(db)
+                    self.a.clamp_(min=0.1)
 
             else:  # sigmoid
                 # Exponential target
@@ -275,9 +274,10 @@ class IntrinsicPlasticity(nn.Module):
                 da = self.eta * (1/self.a + x_mean - (2 + 1/mu_eff)*xy_mean + xy2_mean/mu_eff)
                 db = self.eta * (1 - (2 + 1/mu_eff)*y_mean + y2_mean/mu_eff)
 
-                self.a.data += da
-                self.b.data += db
-                self.a.data = self.a.data.clamp(min=0.1)
+                with torch.no_grad():
+                    self.a.add_(da)
+                    self.b.add_(db)
+                    self.a.clamp_(min=0.1)
 
 
 class ReservoirWithIP(nn.Module):
@@ -488,7 +488,8 @@ class CriticalReservoir(nn.Module):
             'intermediate': 0.7,
         }
         if mode in mode_map:
-            self.temperature.data = torch.tensor(mode_map[mode])
+            with torch.no_grad():
+                self.temperature.fill_(mode_map[mode])
         else:
             raise ValueError(f"Unknown mode: {mode}. Use: {list(mode_map.keys())}")
 

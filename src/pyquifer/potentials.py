@@ -145,7 +145,7 @@ if __name__ == '__main__':
     # Calculate force at a specific point
     single_position = torch.tensor([[0.5, 0.5]], requires_grad=True)
     force_vector = potential_field.get_force(single_position)
-    print(f"\nForce at position {single_position.data.numpy()}: {force_vector.data.numpy()}")
+    print(f"\nForce at position {single_position.detach().cpu().numpy()}: {force_vector.detach().cpu().numpy()}")
 
     # Demonstrate optimization
     print("\n--- Optimizing Attractor Positions ---")

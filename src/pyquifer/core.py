@@ -8,6 +8,7 @@ from sklearn.decomposition import PCA
 
 from .models import GenerativeWorldModel
 from .frequency_bank import FrequencyBank
+import logging
 
 class PyQuifer(nn.Module):
     """
@@ -66,7 +67,7 @@ class PyQuifer(nn.Module):
             actualization_strength=actualization_strength # Initial value, potentially overridden by viscosity control
         ).to(self.device)
 
-        print(f"PyQuifer initialized on device: {self.device}")
+        logger.info(f"PyQuifer initialized on device: {self.device}")
         
         # Internal state for data handling (Automated Sieve)
         self._data_schema: Optional[Dict[str, Any]] = None
@@ -90,7 +91,7 @@ class PyQuifer(nn.Module):
         Internal method for data preparation and feature mapping - the 'Automated Sieve'.
         Scans, maps, and scales data to fit the model's space_dim.
         """
-        if isinstance(data, List):
+        if isinstance(data, list):
             # Attempt to convert list of dicts to DataFrame
             data = pd.DataFrame(data)
 
@@ -121,7 +122,7 @@ class PyQuifer(nn.Module):
                     processed = scaler.transform(feature_data)
                 processed_features.append(processed)
 
-            elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+            elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or isinstance(df[col].dtype, pd.CategoricalDtype):
                 # Categorical data: One-Hot Encoding (basic 'phase space' mapping)
                 encoder_key = f"one_hot_encoder_{col}"
                 if is_training_data:
@@ -136,7 +137,7 @@ class PyQuifer(nn.Module):
                 processed_features.append(processed)
 
             else:
-                print(f"Warning: Column '{col}' has an unsupported data type ({df[col].dtype}) and will be ignored.")
+                logger.info(f"Warning: Column '{col}' has an unsupported data type ({df[col].dtype}) and will be ignored.")
 
         if not processed_features:
             raise ValueError("No processable features found in the ingested data.")
@@ -150,7 +151,7 @@ class PyQuifer(nn.Module):
             padding_needed = self.space_dim - processed_data_np.shape[1]
             padding = np.zeros((processed_data_np.shape[0], padding_needed))
             processed_data_np = np.hstack([processed_data_np, padding])
-            print(f"Data padded with {padding_needed} dimensions to match space_dim ({self.space_dim}).")
+            logger.info(f"Data padded with {padding_needed} dimensions to match space_dim ({self.space_dim}).")
         elif processed_data_np.shape[1] > self.space_dim:
             # Apply dimensionality reduction based on configured method
             original_dims = processed_data_np.shape[1]
@@ -163,7 +164,7 @@ class PyQuifer(nn.Module):
             elif self._dim_reduction == 'truncate':
                 # Simply take first space_dim dimensions
                 processed_data_np = processed_data_np[:, :self.space_dim]
-                print(f"Data truncated from {original_dims} to {self.space_dim} dimensions.")
+                logger.info(f"Data truncated from {original_dims} to {self.space_dim} dimensions.")
 
             elif self._dim_reduction == 'pca':
                 # Use PCA to reduce dimensions while preserving variance
@@ -171,7 +172,7 @@ class PyQuifer(nn.Module):
                     self._pca_model = PCA(n_components=self.space_dim)
                     processed_data_np = self._pca_model.fit_transform(processed_data_np)
                     explained_var = sum(self._pca_model.explained_variance_ratio_) * 100
-                    print(f"PCA reduced {original_dims} dims to {self.space_dim} "
+                    logger.info(f"PCA reduced {original_dims} dims to {self.space_dim} "
                           f"(explained variance: {explained_var:.1f}%).")
                 else:
                     if self._pca_model is None:
@@ -186,7 +187,7 @@ class PyQuifer(nn.Module):
         This is the core of the 'Viscosity Control'.
         """
         if processed_data.numel() == 0:
-            print("Warning: Processed data is empty, cannot calculate viscosity parameters.")
+            logger.info("Warning: Processed data is empty, cannot calculate viscosity parameters.")
             return
 
         # Calculate variance of the processed data (across all features for simplicity)
@@ -205,7 +206,7 @@ class PyQuifer(nn.Module):
         
         self.model.mind_eye_actualization.actualization_strength = new_actualization_strength
         self.model.actualization_strength = new_actualization_strength  # Keep in sync
-        print(f"Viscosity Control: Adjusted actualization_strength to {new_actualization_strength:.4f} "
+        logger.info(f"Viscosity Control: Adjusted actualization_strength to {new_actualization_strength:.4f} "
               f"based on data variance ({data_variance:.4f}).")
 
     def ingest_data(self, data: Union[pd.DataFrame, np.ndarray, List[Dict]], feature_mapping: Optional[Dict[str, str]] = None):
@@ -220,7 +221,7 @@ class PyQuifer(nn.Module):
                                               The 'Sieve' aims to automate this, but explicit
                                               mapping can be provided here for future use.
         """
-        print("Ingesting data...")
+        logger.info("Ingesting data...")
         # Store raw data (optional, for debugging or later re-processing)
         self._raw_data_storage = data 
         
@@ -228,7 +229,7 @@ class PyQuifer(nn.Module):
         processed_np = self._preprocess_data(data, is_training_data=True)
         
         self._processed_data_storage = torch.from_numpy(processed_np).float().to(self.device)
-        print(f"Data ingested and processed. Shape: {self._processed_data_storage.shape}")
+        logger.info(f"Data ingested and processed. Shape: {self._processed_data_storage.shape}")
 
         # Apply Viscosity Control after data ingestion and processing
         if self._viscosity_control_enabled:
@@ -268,7 +269,7 @@ class PyQuifer(nn.Module):
         kuramoto_rs = []
         archetypes = []
         
-        print(f"\n--- Running Actualization for {num_cycles} cycles ---")
+        logger.info(f"\n--- Running Actualization for {num_cycles} cycles ---")
         for cycle in range(num_cycles):
             current_time_offset = time_offset + cycle * 0.1 # Example: time evolves
 
@@ -292,10 +293,10 @@ class PyQuifer(nn.Module):
             if self._kuramoto_callback:
                 self._kuramoto_callback(kuramoto_r, cycle, "actualize_vision")
             if self._kuramoto_threshold is not None and kuramoto_r >= self._kuramoto_threshold:
-                print(f"Kuramoto Live Feed: R ({kuramoto_r:.4f}) exceeded threshold ({self._kuramoto_threshold:.4f}). Early termination.")
+                logger.info(f"Kuramoto Live Feed: R ({kuramoto_r:.4f}) exceeded threshold ({self._kuramoto_threshold:.4f}). Early termination.")
                 break
 
-            print(f"Cycle {cycle+1:2d}: Final State Sample={final_state[0].squeeze().detach().cpu().numpy()}, Kuramoto R={kuramoto_r:.4f}")
+            logger.info(f"Cycle {cycle+1:2d}: Final State Sample={final_state[0].squeeze().detach().cpu().numpy()}, Kuramoto R={kuramoto_r:.4f}")
 
         return {
             "final_actualized_states": torch.stack(final_actualized_states),
@@ -346,9 +347,9 @@ class PyQuifer(nn.Module):
         archetype_learning_history = [self.model.archetype_vector.squeeze().detach().cpu().numpy()]
         loss_history = []
 
-        print(f"\n--- Starting Training for {learning_epochs} Epochs ---")
-        print(f"Initial Archetype Vector: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
-        print(f"Target Archetype Value:   {target_archetype_value.cpu().numpy()}")
+        logger.info(f"\n--- Starting Training for {learning_epochs} Epochs ---")
+        logger.info(f"Initial Archetype Vector: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
+        logger.info(f"Target Archetype Value:   {target_archetype_value.cpu().numpy()}")
 
         for epoch in range(learning_epochs):
             optimizer.zero_grad()
@@ -380,7 +381,7 @@ class PyQuifer(nn.Module):
             if self._kuramoto_callback:
                 self._kuramoto_callback(kuramoto_r, epoch, "train")
             if self._kuramoto_threshold is not None and kuramoto_r >= self._kuramoto_threshold:
-                print(f"Kuramoto Live Feed: R ({kuramoto_r:.4f}) exceeded threshold ({self._kuramoto_threshold:.4f}). Early termination.")
+                logger.info(f"Kuramoto Live Feed: R ({kuramoto_r:.4f}) exceeded threshold ({self._kuramoto_threshold:.4f}). Early termination.")
                 break
 
 
@@ -391,10 +392,10 @@ class PyQuifer(nn.Module):
             loss_history.append(loss.item())
 
             if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1:3d}, Loss: {loss.item():.6f}, Current Archetype: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
+                logger.info(f"Epoch {epoch+1:3d}, Loss: {loss.item():.6f}, Current Archetype: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
 
-        print("\n--- Training Complete ---")
-        print(f"Final Learned Archetype: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
+        logger.info("\n--- Training Complete ---")
+        logger.info(f"Final Learned Archetype: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
         
         return {
             "archetype_history": np.array(archetype_learning_history),
@@ -409,7 +410,7 @@ class PyQuifer(nn.Module):
         self._viscosity_control_enabled = enable
         if viscosity_constant is not None:
             self._viscosity_constant = viscosity_constant
-        print(f"Viscosity Control: {'Enabled' if enable else 'Disabled'}. Constant set to {self._viscosity_constant}.")
+        logger.info(f"Viscosity Control: {'Enabled' if enable else 'Disabled'}. Constant set to {self._viscosity_constant}.")
 
     def set_kuramoto_live_feed(self, threshold: Optional[float] = None, callback: Optional[Callable[[float, int, str], None]] = None):
         """
@@ -424,7 +425,7 @@ class PyQuifer(nn.Module):
         """
         self._kuramoto_threshold = threshold
         self._kuramoto_callback = callback
-        print(f"Kuramoto Live Feed: Threshold set to {threshold if threshold is not None else 'None'}, Callback {'set' if callback else 'not set'}.")
+        logger.info(f"Kuramoto Live Feed: Threshold set to {threshold if threshold is not None else 'None'}, Callback {'set' if callback else 'not set'}.")
 
     def get_realtime_metrics(self) -> Dict[str, float]:
         """Provides real-time metrics like Kuramoto Order Parameter."""
@@ -432,6 +433,8 @@ class PyQuifer(nn.Module):
             return {"kuramoto_order_parameter": self.model.frequency_bank.get_aggregated_order_parameter()}
         return {}
 
+
+logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
@@ -476,7 +479,7 @@ if __name__ == '__main__':
     )
 
     print("\nActualization Results:")
-    print(f"Final Actualized State Sample: {actualization_results['final_actualized_states'][-1, 0].squeeze().numpy()}")
+    print(f"Final Actualized State Sample: {actualization_results['final_actualized_states'][-1, 0].squeeze().detach().cpu().numpy()}")
     print(f"Kuramoto R History (last 5): {actualization_results['kuramoto_order_parameter_history'][-5:]}")
 
     # 4. Train PyQuifer (e.g., to learn a specific archetype)

@@ -218,8 +218,8 @@ if __name__ == '__main__':
     batch_size = 5
     initial_specimen_states = torch.rand(batch_size, space_dim)
 
-    print(f"Initial specimen states (sample):\n{initial_specimen_states[0].numpy()}")
-    print(f"Target archetype vector: {archetype_vector.numpy()}")
+    print(f"Initial specimen states (sample):\n{initial_specimen_states[0].detach().cpu().numpy()}")
+    print(f"Target archetype vector: {archetype_vector.detach().cpu().numpy()}")
 
     # Run actualization (inference mode)
     final_states = mind_model(
@@ -231,7 +231,7 @@ if __name__ == '__main__':
         force_schedule=True
     )
 
-    print(f"\nFinal actualized states (sample):\n{final_states[0].detach().numpy()}")
+    print(f"\nFinal actualized states (sample):\n{final_states[0].detach().cpu().numpy()}")
     print(f"Distance to target: {torch.norm(final_states[0] - archetype_vector).item():.4f}")
 
     # Demonstrate training mode with learnable target
@@ -266,7 +266,7 @@ if __name__ == '__main__':
 
         if epoch % 5 == 0:
             print(f"Epoch {epoch}: Loss={loss.item():.4f}, "
-                  f"Target={learnable_model.target_vector.squeeze().detach().numpy()}")
+                  f"Target={learnable_model.target_vector.squeeze().detach().cpu().numpy()}")
 
-    print(f"\nFinal learned target: {learnable_model.target_vector.squeeze().detach().numpy()}")
-    print(f"Desired state: {desired_state.squeeze().numpy()}")
+    print(f"\nFinal learned target: {learnable_model.target_vector.squeeze().detach().cpu().numpy()}")
+    print(f"Desired state: {desired_state.squeeze().detach().cpu().numpy()}")

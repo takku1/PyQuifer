@@ -124,11 +124,12 @@ class EpisodicBuffer(nn.Module):
         """
         valid = min(self.num_stored.item(), self.capacity)
         if valid == 0:
+            dev = self.states.device
             return {
-                'states': torch.zeros(0, self.state_dim),
-                'rewards': torch.zeros(0),
-                'contexts': torch.zeros(0, self.context_dim),
-                'indices': torch.zeros(0, dtype=torch.long),
+                'states': torch.zeros(0, self.state_dim, device=dev),
+                'rewards': torch.zeros(0, device=dev),
+                'contexts': torch.zeros(0, self.context_dim, device=dev),
+                'indices': torch.zeros(0, dtype=torch.long, device=dev),
             }
 
         batch_size = min(batch_size, valid)
@@ -151,8 +152,8 @@ class EpisodicBuffer(nn.Module):
         valid = min(self.num_stored.item(), self.capacity)
         return {
             'num_stored': self.num_stored.clone(),
-            'mean_reward': self.rewards[:valid].mean() if valid > 0 else torch.tensor(0.0),
-            'max_reward': self.rewards[:valid].max() if valid > 0 else torch.tensor(0.0),
+            'mean_reward': self.rewards[:valid].mean() if valid > 0 else torch.tensor(0.0, device=self.rewards.device),
+            'max_reward': self.rewards[:valid].max() if valid > 0 else torch.tensor(0.0, device=self.rewards.device),
         }
 
     def reset(self):
@@ -219,7 +220,7 @@ class SharpWaveRipple(nn.Module):
                 'replayed_states': torch.zeros(0, self.state_dim,
                                                device=buffer.states.device),
                 'replayed_rewards': torch.zeros(0, device=buffer.states.device),
-                'replay_active': torch.tensor(False),
+                'replay_active': torch.tensor(False, device=buffer.states.device),
             }
 
         # Sample with priority (high reward = more likely to replay)
@@ -239,7 +240,7 @@ class SharpWaveRipple(nn.Module):
         return {
             'replayed_states': replayed,
             'replayed_rewards': sample['rewards'],
-            'replay_active': torch.tensor(True),
+            'replay_active': torch.tensor(True, device=buffer.states.device),
         }
 
 
@@ -342,11 +343,11 @@ class ConsolidationEngine(nn.Module):
                 consolidated_count += 1
 
         return {
-            'consolidated': torch.tensor(True),
-            'num_consolidated': torch.tensor(consolidated_count),
+            'consolidated': torch.tensor(True, device=self.semantic_traces.device),
+            'num_consolidated': torch.tensor(consolidated_count, device=self.semantic_traces.device),
             'num_traces': self.num_traces.clone(),
             'mean_trace_strength': self.trace_strengths[:min(self.num_traces.item(), self.num_semantic_slots)].mean()
-            if self.num_traces > 0 else torch.tensor(0.0),
+            if self.num_traces > 0 else torch.tensor(0.0, device=self.trace_strengths.device),
         }
 
     def forward(self,
@@ -450,7 +451,7 @@ class MemoryReconsolidation(nn.Module):
 
         return {
             'reconsolidated': reconsolidated,
-            'lability': torch.tensor(lability),
+            'lability': torch.tensor(lability, device=memory.device),
             'change_magnitude': change,
         }
 

@@ -98,7 +98,7 @@ class DynamicalSignatureDetector(nn.Module):
             self.state_history[self.history_ptr] = state
             self.history_ptr = (self.history_ptr + 1) % self.history_length
             if self.history_ptr == 0:
-                self.history_filled = torch.tensor(True)
+                self.history_filled.fill_(True)
 
     def compute_entropy(self, state: torch.Tensor) -> torch.Tensor:
         """
@@ -111,7 +111,7 @@ class DynamicalSignatureDetector(nn.Module):
         if self.history_filled:
             historical_variance = self.state_history.var(dim=0).mean()
         else:
-            historical_variance = torch.tensor(0.5)
+            historical_variance = torch.tensor(0.5, device=state.device)
 
         # Neural entropy estimate
         neural_entropy = self.entropy_net(state)
@@ -133,7 +133,7 @@ class DynamicalSignatureDetector(nn.Module):
             prev_idx = (self.history_ptr - 2) % self.history_length
             velocity = (self.state_history[recent_idx] - self.state_history[prev_idx]).abs().mean()
         else:
-            velocity = torch.tensor(0.5)
+            velocity = torch.tensor(0.5, device=state.device)
 
         # Neural plasticity estimate
         neural_plasticity = self.plasticity_net(state)
@@ -157,7 +157,7 @@ class DynamicalSignatureDetector(nn.Module):
 
             combined = torch.cat([state, mean_state])
         else:
-            deviation = torch.tensor(0.5)
+            deviation = torch.tensor(0.5, device=state.device)
             combined = torch.cat([state, state])
 
         # Neural stability estimate

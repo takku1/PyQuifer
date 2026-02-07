@@ -28,7 +28,7 @@ dependencies = [
     "torch>=2.0.0",
     "numpy",
     "pandas",
-    "scikit-learn",
+    "scikit-learn>=1.2",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +41,7 @@ docs = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.2.0",
     "matplotlib>=3.5.0",
 ]
 
@@ -57,3 +58,23 @@ include = ["pyquifer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+norecursedirs = [
+    "EGG",
+    "Gymnasium",
+    "KuraNet",
+    "MD-Bench",
+    "PredBench",
+    "SciMLBenchmarks.jl",
+    "Torch2PC",
+    "bifurcation",
+    "emergent_communication_at_scale",
+    "hanabi-learning-environment",
+    "lava",
+    "meltingpot",
+    "neurobench",
+    "neurodiscoverybench",
+    "nlb_tools",
+    "open_spiel",
+    "torchdiffeq",
+    "torchdyn",
+]

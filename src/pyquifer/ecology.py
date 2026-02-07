@@ -261,7 +261,7 @@ class ImmunologicalLayer(nn.Module):
             self.self_patterns[self.pattern_ptr] = pattern
             self.pattern_ptr = (self.pattern_ptr + 1) % self.memory_size
             if self.pattern_ptr == 0:
-                self.memory_filled = torch.tensor(True)
+                self.memory_filled.fill_(True)
 
             # Update running statistics
             self.n_samples = self.n_samples + 1
@@ -293,7 +293,7 @@ class ImmunologicalLayer(nn.Module):
             min_distance = distances.min()
             nn_similarity = torch.exp(-min_distance)
         else:
-            nn_similarity = torch.tensor(0.5)
+            nn_similarity = torch.tensor(0.5, device=pattern.device)
 
         # Method 3: Neural recognition
         combined = torch.cat([pattern, self.self_mean])
@@ -573,7 +573,7 @@ class Umwelt(nn.Module):
         """Add a frequency that the system cannot perceive."""
         self.blind_frequencies = torch.cat([
             self.blind_frequencies,
-            torch.tensor([frequency])
+            torch.tensor([frequency], device=self.blind_frequencies.device)
         ])
 
     def get_sensitivity_profile(self) -> torch.Tensor:

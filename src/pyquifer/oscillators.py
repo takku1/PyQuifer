@@ -274,7 +274,7 @@ class LearnableKuramotoBank(nn.Module):
                     sum_sin = sin_phases.sum()
                     sum_cos = cos_phases.sum()
                     interaction_sum = cos_phases * (sum_sin - sin_phases) - sin_phases * (sum_cos - cos_phases)
-                    normalized_interaction = interaction_sum / (self.num_oscillators - 1)
+                    normalized_interaction = interaction_sum / max(self.num_oscillators - 1, 1)
             else:
                 # Calculate phase differences: theta_j - theta_i
                 phase_diffs = phases.unsqueeze(1) - phases.unsqueeze(0)  # (n, n)
@@ -577,31 +577,41 @@ class KuramotoDaidoMeanField(nn.Module):
     Instead of tracking N individual oscillator phases (O(N^2) coupling),
     tracks the complex order parameter Z directly (O(1) per step):
 
-        dZ/dt = (-i*w_mean - Delta + K/2) * Z - K/2 * |Z|^2 * Z
+        dZ/dt = (-i*w_mean - Delta_eff + K/2) * Z - K/2 * |Z|^2 * Z
 
     Where:
     - Z = R * exp(i*Psi) is the complex order parameter
     - w_mean is the mean natural frequency
-    - Delta is the frequency spread (Cauchy half-width)
+    - Delta_eff is the effective frequency spread
     - K is coupling strength
 
-    This is exact for infinite-N Cauchy-distributed frequencies and
-    provides an excellent O(1) approximation for large finite N.
+    For Cauchy/Lorentzian distributed frequencies, the Ott-Antonsen
+    ansatz is exact (Delta_eff = delta, the Cauchy half-width).
+
+    For Gaussian distributed frequencies, a scaled approximation
+    (Montbrio, Pazo & Roxin 2015) is used:
+    Delta_eff = delta * sqrt(2*pi) / 2, where delta is the standard
+    deviation. This gives much better predictions when frequencies
+    are sampled from Uniform or Gaussian distributions.
 
     Args:
         omega_mean: Mean natural frequency
-        delta: Frequency spread (Cauchy half-width at half-maximum)
+        delta: Frequency spread (Cauchy half-width or Gaussian std)
         coupling: Coupling strength K
         dt: Integration timestep
+        distribution: 'cauchy' (exact Ott-Antonsen) or 'gaussian'
+                      (Montbrio-Pazo-Roxin scaled approximation)
     """
 
     def __init__(self,
                  omega_mean: float = 1.0,
                  delta: float = 0.1,
                  coupling: float = 1.0,
-                 dt: float = 0.01):
+                 dt: float = 0.01,
+                 distribution: str = 'cauchy'):
         super().__init__()
         self.dt = dt
+        self.distribution = distribution
 
         # Learnable dynamics parameters
         self.omega_mean = nn.Parameter(torch.tensor(omega_mean))
@@ -647,14 +657,21 @@ class KuramotoDaidoMeanField(nn.Module):
         """
         Z = self.Z
 
+        # Effective spread: for Gaussian, scale delta by sqrt(2*pi)/2
+        # (Montbrio, Pazo & Roxin 2015 QIF mean-field reduction)
+        if self.distribution == 'gaussian':
+            delta_eff = self.delta * (math.sqrt(2 * math.pi) / 2)
+        else:
+            delta_eff = self.delta
+
         for _ in range(steps):
             K = self.coupling
             w = self.omega_mean
 
             # Ott-Antonsen mean-field ODE
-            # dZ/dt = (-i*w - Delta + K/2) * Z - K/2 * |Z|^2 * Z
+            # dZ/dt = (-i*w - Delta_eff + K/2) * Z - K/2 * |Z|^2 * Z
             Z_sq_mag = (Z.real ** 2 + Z.imag ** 2)
-            linear_coeff = torch.complex(-self.delta + K / 2, -w)
+            linear_coeff = torch.complex(-delta_eff + K / 2, -w)
             dZ = linear_coeff * Z - (K / 2) * Z_sq_mag * Z
 
             if external_field is not None:
@@ -679,37 +696,68 @@ class KuramotoDaidoMeanField(nn.Module):
 
     @classmethod
     def from_frequencies(cls, omega_samples: torch.Tensor,
-                         coupling: float = 1.0, dt: float = 0.01) -> 'KuramotoDaidoMeanField':
-        """Construct mean-field model by fitting Cauchy distribution to frequency samples.
+                         coupling: float = 1.0, dt: float = 0.01,
+                         distribution: str = 'auto') -> 'KuramotoDaidoMeanField':
+        """Construct mean-field model by fitting distribution to frequency samples.
 
-        Uses IQR-based robust Cauchy fitting (Pietras & Daffertshofer 2016):
+        For Cauchy: uses IQR-based robust fitting (Pietras & Daffertshofer 2016):
         - omega_mean = median(samples)
         - delta = IQR / 2  (half-width at half-maximum of Cauchy)
 
-        This gives a much better Ott-Antonsen match than naive mean/std mapping.
+        For Gaussian: uses mean and standard deviation directly:
+        - omega_mean = mean(samples)
+        - delta = std(samples)
+
+        With distribution='auto', uses excess kurtosis to choose:
+        - kurtosis < 6 → Gaussian (normal kurtosis = 3, uniform = 1.8)
+        - kurtosis >= 6 → Cauchy (theoretical kurtosis = infinity)
 
         Args:
             omega_samples: Tensor of sampled natural frequencies (N,)
             coupling: Coupling strength K
             dt: Integration timestep
+            distribution: 'auto', 'cauchy', or 'gaussian'
 
         Returns:
             KuramotoDaidoMeanField instance with fitted parameters
         """
-        omega_sorted = omega_samples.sort().values
-        n = len(omega_sorted)
-        q25 = omega_sorted[max(0, int(n * 0.25))].item()
-        q75 = omega_sorted[min(n - 1, int(n * 0.75))].item()
-        omega_mean = omega_sorted[n // 2].item()  # median
-        delta = max((q75 - q25) / 2.0, 1e-6)  # IQR-based Cauchy half-width
-        return cls(omega_mean=omega_mean, delta=delta, coupling=coupling, dt=dt)
+        if distribution == 'auto':
+            # Excess kurtosis test: Cauchy has very heavy tails
+            mean_val = omega_samples.mean()
+            std_val = omega_samples.std()
+            if std_val > 1e-8:
+                centered = omega_samples - mean_val
+                kurtosis = (centered ** 4).mean() / (std_val ** 4)
+            else:
+                kurtosis = 3.0  # Default to Gaussian
+            distribution = 'gaussian' if kurtosis < 6.0 else 'cauchy'
+
+        if distribution == 'gaussian':
+            omega_mean = omega_samples.mean().item()
+            delta = max(omega_samples.std().item(), 1e-6)
+        else:
+            omega_sorted = omega_samples.sort().values
+            n = len(omega_sorted)
+            q25 = omega_sorted[max(0, int(n * 0.25))].item()
+            q75 = omega_sorted[min(n - 1, int(n * 0.75))].item()
+            omega_mean = omega_sorted[n // 2].item()  # median
+            delta = max((q75 - q25) / 2.0, 1e-6)  # IQR-based Cauchy half-width
+
+        return cls(omega_mean=omega_mean, delta=delta, coupling=coupling,
+                   dt=dt, distribution=distribution)
 
     def get_order_parameter(self) -> torch.Tensor:
         """Get current synchronization level R."""
         return self.R
 
     def get_critical_coupling(self) -> torch.Tensor:
-        """Critical coupling Kc = 2 * Delta (onset of synchronization)."""
+        """Critical coupling for onset of synchronization.
+
+        Cauchy: Kc = 2 * delta
+        Gaussian: Kc = 2 * delta * sqrt(2*pi) / pi  (Montbrio et al. 2015)
+        """
+        if self.distribution == 'gaussian':
+            return 2.0 * self.delta * math.sqrt(2 * math.pi) / math.pi
         return 2.0 * self.delta
 
     def is_synchronized(self, threshold: float = 0.5) -> bool:
@@ -728,8 +776,8 @@ if __name__ == '__main__':
     snake_act = Snake(frequency=0.5)
     test_tensor = torch.linspace(-5, 5, 10)
     output_snake = snake_act(test_tensor)
-    print(f"Input to Snake: {test_tensor.detach().numpy()}")
-    print(f"Output from Snake: {output_snake.detach().numpy()}")
+    print(f"Input to Snake: {test_tensor.detach().cpu().numpy()}")
+    print(f"Output from Snake: {output_snake.detach().cpu().numpy()}")
 
     print("\n--- LearnableKuramotoBank with Different Topologies ---")
 

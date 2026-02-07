@@ -514,7 +514,7 @@ class IntegratedInformation(nn.Module):
             self.state_history[self.history_ptr % self.temporal_window] = state[0]
             self.history_ptr = self.history_ptr + 1
             if self.history_ptr >= self.temporal_window:
-                self.history_filled = torch.tensor(True, device=state.device)
+                self.history_filled.fill_(True)
 
         # Temporal Phi (integration across time)
         if compute_temporal and self.history_filled:

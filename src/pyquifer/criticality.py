@@ -70,7 +70,7 @@ class AvalancheDetector(nn.Module):
         active = (activity.abs() > self.activity_threshold).sum()
 
         avalanche_ended = False
-        last_size = torch.tensor(0)
+        last_size = torch.tensor(0, device=activity.device)
 
         with torch.no_grad():
             if active > 0:
@@ -99,7 +99,7 @@ class AvalancheDetector(nn.Module):
         return {
             'num_active': active,
             'in_avalanche': self.in_avalanche.clone(),
-            'avalanche_ended': torch.tensor(avalanche_ended),
+            'avalanche_ended': torch.tensor(avalanche_ended, device=activity.device),
             'last_size': last_size
         }
 
@@ -113,10 +113,11 @@ class AvalancheDetector(nn.Module):
         """
         valid = self.avalanche_sizes[:min(self.size_ptr.item(), self.max_history)]
         if len(valid) == 0:
-            return torch.tensor([]), torch.tensor([])
+            dev = self.avalanche_sizes.device
+            return torch.tensor([], device=dev), torch.tensor([], device=dev)
 
         sizes = valid.unique(sorted=True)
-        counts = torch.tensor([(valid == s).sum() for s in sizes])
+        counts = torch.stack([(valid == s).sum() for s in sizes])
 
         return sizes, counts
 
@@ -131,7 +132,7 @@ class AvalancheDetector(nn.Module):
         """
         sizes, counts = self.get_size_distribution()
         if len(sizes) < 3:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, device=self.avalanche_sizes.device)
 
         # Log-log linear regression (no +1 smoothing: sizes/counts are already ≥1)
         log_sizes = torch.log(sizes.float())
@@ -167,18 +168,33 @@ class BranchingRatio(nn.Module):
     - sigma > 1: supercritical (activity explodes)
 
     Critical systems have sigma very close to 1.
+
+    Uses the ratio-of-means estimator (Harris 1963; Beggs & Plenz 2003):
+    sigma = mean(descendants) / mean(ancestors), which is bounded by
+    the data range and robust to near-zero ancestor counts that cause
+    the mean-of-ratios estimator to explode.
+
+    Args:
+        window_size: Number of time steps to average over
+        variance_threshold: If activity variance falls below this, return
+                           sigma=1.0 with converged=True (quiescent regime)
+        estimator: 'ratio_of_means' (default, robust) or 'mean_of_ratios'
+                   (legacy, can blow up on bursty subcritical data)
     """
 
-    def __init__(self, window_size: int = 50, variance_threshold: float = 1e-6):
+    def __init__(self, window_size: int = 50, variance_threshold: float = 1e-6,
+                 estimator: str = 'ratio_of_means'):
         """
         Args:
             window_size: Number of time steps to average over
             variance_threshold: If activity variance falls below this, return
                                sigma=1.0 with converged=True (quiescent regime)
+            estimator: 'ratio_of_means' (default) or 'mean_of_ratios' (legacy)
         """
         super().__init__()
         self.window_size = window_size
         self.variance_threshold = variance_threshold
+        self.estimator = estimator
 
         self.register_buffer('activity_history', torch.zeros(window_size))
         self.register_buffer('history_ptr', torch.tensor(0))
@@ -204,10 +220,11 @@ class BranchingRatio(nn.Module):
 
         # Need at least 2 points
         n_valid = min(self.history_ptr.item(), self.window_size)
+        dev = activity.device
         if n_valid < 2:
             return {
-                'branching_ratio': torch.tensor(1.0),
-                'criticality_distance': torch.tensor(0.0)
+                'branching_ratio': torch.tensor(1.0, device=dev),
+                'criticality_distance': torch.tensor(0.0, device=dev)
             }
 
         history = self.activity_history[:n_valid]
@@ -216,17 +233,21 @@ class BranchingRatio(nn.Module):
         activity_var = history.var()
         if activity_var.item() < self.variance_threshold:
             return {
-                'branching_ratio': torch.tensor(1.0),
-                'criticality_distance': torch.tensor(0.0),
+                'branching_ratio': torch.tensor(1.0, device=dev),
+                'criticality_distance': torch.tensor(0.0, device=dev),
                 'converged': True,
             }
 
-        # Branching ratio = mean of per-step ratios (unbiased by Jensen's inequality)
         ancestors = history[:-1]
         descendants = history[1:]
 
-        # Mean-of-ratios: unbiased estimator
-        sigma = (descendants / (ancestors + 1e-6)).mean()
+        if self.estimator == 'mean_of_ratios':
+            # Legacy mean-of-ratios: can blow up on bursty subcritical data
+            sigma = (descendants / (ancestors + 1e-6)).mean()
+        else:
+            # Ratio-of-means (Harris 1963; Beggs & Plenz 2003):
+            # bounded by data range, no blowup from near-zero ancestors
+            sigma = descendants.mean() / (ancestors.mean() + 1e-6)
 
         return {
             'branching_ratio': sigma,
@@ -257,7 +278,10 @@ class CriticalityController(nn.Module):
                  min_coupling: float = 0.1,
                  max_coupling: float = 2.0,
                  min_noise: float = 0.01,
-                 max_noise: float = 1.0):
+                 max_noise: float = 1.0,
+                 kp: float = 1.0,
+                 ki: float = 0.1,
+                 integral_windup_limit: float = 10.0):
         """
         Args:
             target_branching_ratio: Target sigma (1.0 for critical)
@@ -266,6 +290,9 @@ class CriticalityController(nn.Module):
             max_coupling: Maximum allowed coupling strength
             min_noise: Minimum noise level
             max_noise: Maximum noise level
+            kp: Proportional gain for PI controller
+            ki: Integral gain for PI controller
+            integral_windup_limit: Anti-windup clamp for integral term
         """
         super().__init__()
         self.target_sigma = target_branching_ratio
@@ -274,6 +301,9 @@ class CriticalityController(nn.Module):
         self.max_coupling = max_coupling
         self.min_noise = min_noise
         self.max_noise = max_noise
+        self.kp = kp
+        self.ki = ki
+        self.integral_windup_limit = integral_windup_limit
 
         # Criticality monitors
         self.avalanche_detector = AvalancheDetector()
@@ -282,6 +312,9 @@ class CriticalityController(nn.Module):
         # Controlled state (adapted by controller dynamics, not backprop)
         self.register_buffer('coupling_adjustment', torch.tensor(1.0))
         self.register_buffer('noise_adjustment', torch.tensor(1.0))
+
+        # PI controller integral error accumulator
+        self.register_buffer('integral_error', torch.tensor(0.0))
 
         # History for stability analysis
         self.register_buffer('sigma_history', torch.zeros(100))
@@ -308,13 +341,19 @@ class CriticalityController(nn.Module):
             self.sigma_history[self.sigma_ptr % 100] = sigma
             self.sigma_ptr.add_(1)
 
-        # Compute control adjustments
+        # PI controller (Shew et al. 2015 criticality homeostasis)
         sigma_error = sigma - self.target_sigma
 
-        # If sigma < 1 (subcritical): increase coupling, decrease noise
-        # If sigma > 1 (supercritical): decrease coupling, increase noise
-        coupling_delta = -sigma_error * self.adaptation_rate
-        noise_delta = sigma_error * self.adaptation_rate * 0.5  # Noise has smaller effect
+        # Accumulate integral error with anti-windup clamp
+        with torch.no_grad():
+            self.integral_error.add_(sigma_error)
+            self.integral_error.clamp_(-self.integral_windup_limit,
+                                        self.integral_windup_limit)
+
+        # PI control law: delta = -(Kp * error + Ki * integral) * rate
+        pi_signal = self.kp * sigma_error + self.ki * self.integral_error
+        coupling_delta = -pi_signal * self.adaptation_rate
+        noise_delta = pi_signal * self.adaptation_rate * 0.5  # Noise has smaller effect
 
         # Apply adjustments (with clamping)
         with torch.no_grad():
@@ -364,6 +403,7 @@ class CriticalityController(nn.Module):
         self.branching_monitor.reset()
         self.coupling_adjustment.data.fill_(1.0)
         self.noise_adjustment.data.fill_(1.0)
+        self.integral_error.zero_()
         self.sigma_history.zero_()
         self.sigma_ptr.zero_()
 
@@ -550,12 +590,12 @@ class KoopmanBifurcationDetector(nn.Module):
         try:
             U, S, Vh = torch.linalg.svd(X, full_matrices=False)
         except RuntimeError:
-            return torch.tensor([0.0])
+            return torch.tensor([0.0], device=X.device)
 
         # Truncate to rank
         r = min(self.rank, len(S), U.shape[1])
         if r == 0:
-            return torch.tensor([0.0])
+            return torch.tensor([0.0], device=X.device)
 
         U_r = U[:, :r]
         S_r = S[:r]
@@ -569,7 +609,7 @@ class KoopmanBifurcationDetector(nn.Module):
         try:
             eigenvalues = torch.linalg.eigvals(A_tilde)
         except RuntimeError:
-            return torch.tensor([0.0])
+            return torch.tensor([0.0], device=X.device)
 
         return torch.abs(eigenvalues)
 

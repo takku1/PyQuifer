@@ -194,7 +194,7 @@ class RewardModulatedHebbian(nn.Module):
             delta = self.trace.apply_reward(reward_tensor, self.learning_rate)
 
             # Apply update with weight decay
-            self.weights.data = self.weights.data + delta - self.weight_decay * self.weights.data
+            self.weights.mul_(1 - self.weight_decay).add_(delta)
 
     def reset_traces(self):
         """Reset eligibility traces."""
@@ -328,9 +328,9 @@ class ContrastiveHebbian(nn.Module):
             delta_ho = (corr_ho_clamp - corr_ho_free) / batch_size
 
             # Apply updates
-            self.W_ih.data = self.W_ih.data + self.learning_rate * delta_ih
-            self.W_hh.data = self.W_hh.data + self.learning_rate * delta_hh
-            self.W_ho.data = self.W_ho.data + self.learning_rate * delta_ho
+            self.W_ih.add_(self.learning_rate * delta_ih)
+            self.W_hh.add_(self.learning_rate * delta_hh)
+            self.W_ho.add_(self.learning_rate * delta_ho)
 
         return {
             'delta_ih_norm': delta_ih.norm(),
@@ -483,14 +483,13 @@ class PredictiveCoding(nn.Module):
                 delta_w = -self.learning_rate * torch.matmul(err.T, state_above) / batch_size
                 delta_b = -self.learning_rate * err.mean(dim=0)
 
-                pred.weight.data = pred.weight.data + delta_w
-                pred.bias.data = pred.bias.data + delta_b
+                pred.weight.add_(delta_w)
+                pred.bias.add_(delta_b)
 
                 # Error weight update: soft alignment toward predictor transpose
                 # Biological predictive coding uses approximate reciprocal weights
-                target_err_w = pred.weight.data.T
-                self.error_weights[i].weight.data = (
-                    (1 - self.learning_rate) * self.error_weights[i].weight.data +
+                target_err_w = pred.weight.detach().T
+                self.error_weights[i].weight.mul_(1 - self.learning_rate).add_(
                     self.learning_rate * target_err_w
                 )
 
@@ -614,7 +613,7 @@ class LearnableEligibilityTrace(nn.Module):
         if self.learnable:
             return torch.sigmoid(self.decay_logit)
         else:
-            return torch.tensor(self.decay_rate_val)
+            return torch.tensor(self.decay_rate_val, device=self.trace.device)
 
     def forward(self,
                 activity: torch.Tensor,

@@ -317,7 +317,7 @@ if __name__ == '__main__':
         errors[:, 4:] *= 2.0
         result = aap(signal, errors, acetylcholine=0.5, norepinephrine=0.3)
 
-    print(f"   Attention map: {result['attention_map'].detach().numpy().round(3)}")
+    print(f"   Attention map: {result['attention_map'].detach().cpu().numpy().round(3)}")
     print(f"   High precision channels attended more: "
           f"{result['attention_map'][:4].sum().item():.3f} > "
           f"{result['attention_map'][4:].sum().item():.3f}")

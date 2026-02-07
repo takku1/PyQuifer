@@ -301,15 +301,14 @@ class MetastabilityIndex(nn.Module):
             patterns = (active * powers).sum(dim=1)
             unique_patterns = patterns.unique()
             # Entropy of pattern distribution
-            counts = torch.tensor([(patterns == p).sum().float() for p in unique_patterns],
-                                  device=history.device)
+            counts = torch.stack([(patterns == p).sum().float() for p in unique_patterns])
             probs = counts / counts.sum()
             coalition_entropy = -(probs * torch.log(probs + 1e-8)).sum()
             max_entropy = math.log(min(n_valid, 2 ** self.num_populations))
             normalized_entropy = coalition_entropy / (max_entropy + 1e-8)
         else:
-            coalition_entropy = torch.tensor(0.0)
-            normalized_entropy = torch.tensor(0.0)
+            coalition_entropy = torch.tensor(0.0, device=history.device)
+            normalized_entropy = torch.tensor(0.0, device=history.device)
 
         # Metastability index from dwell times
         mean_dwells = flow_result['mean_dwell_times']
@@ -317,7 +316,7 @@ class MetastabilityIndex(nn.Module):
         if len(active_dwells) > 1:
             mi = active_dwells.std() / (active_dwells.mean() + 1e-8)
         else:
-            mi = torch.tensor(0.0)
+            mi = torch.tensor(0.0, device=history.device)
 
         # Chimera index: variance of per-population synchronization
         if n_valid > 10:
@@ -325,7 +324,7 @@ class MetastabilityIndex(nn.Module):
             pop_coherence = history.std(dim=0)
             chimera = pop_coherence.std() / (pop_coherence.mean() + 1e-8)
         else:
-            chimera = torch.tensor(0.0)
+            chimera = torch.tensor(0.0, device=history.device)
 
         return {
             'activations': comp_result['activations'],
@@ -361,7 +360,7 @@ if __name__ == '__main__':
 
     unique_visited = len(set(dominants))
     print(f"   States visited: {unique_visited}/6")
-    print(f"   Final activations: {result['activations'].detach().numpy().round(3)}")
+    print(f"   Final activations: {result['activations'].detach().cpu().numpy().round(3)}")
     print(f"   Dwell signal: {result['dwell_signal'].item():.3f}")
 
     # Example 2: Heteroclinic Channel
@@ -377,8 +376,8 @@ if __name__ == '__main__':
             transitions += 1
 
     print(f"   Transitions detected: {transitions}")
-    print(f"   Mean dwell times: {flow['mean_dwell_times'].detach().numpy().round(1)}")
-    print(f"   Transition matrix:\n{flow['transition_matrix'].detach().numpy().astype(int)}")
+    print(f"   Mean dwell times: {flow['mean_dwell_times'].detach().cpu().numpy().round(1)}")
+    print(f"   Transition matrix:\n{flow['transition_matrix'].detach().cpu().numpy().astype(int)}")
 
     # Example 3: Full Metastability Index
     print("\n3. Metastability Index")
@@ -401,6 +400,6 @@ if __name__ == '__main__':
         result = meta2(external_input=bias)
 
     print(f"   Dominant state: {result['dominant'].item()} (biased toward 0)")
-    print(f"   Activations: {result['activations'].detach().numpy().round(3)}")
+    print(f"   Activations: {result['activations'].detach().cpu().numpy().round(3)}")
 
     print("\n[OK] All metastability tests passed!")

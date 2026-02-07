@@ -36,22 +36,35 @@ class MirrorResonance(nn.Module):
 
     This enables learning by observation through phase entrainment,
     not through explicit token processing.
+
+    No external training required. Phase-locking converges through
+    Kuramoto coupling dynamics. Convergence speed is approximately
+    1 / coupling_strength steps. For short simulations, use
+    adaptive_coupling=True to boost coupling when coherence is low.
     """
 
     def __init__(self,
                  action_dim: int,
                  coupling_strength: float = 0.5,
-                 num_attractors: int = 8):
+                 num_attractors: int = 8,
+                 adaptive_coupling: bool = False,
+                 adaptive_alpha: float = 2.0):
         """
         Args:
             action_dim: Dimension of action/observation space
             coupling_strength: Social "empathy" parameter (higher = stronger mirror)
             num_attractors: Number of distinct action patterns (limit cycles)
+            adaptive_coupling: If True, boost coupling when coherence is low.
+                Effective k = k * (1 + alpha * (1 - coherence)). Default False.
+            adaptive_alpha: Scaling factor for adaptive coupling boost.
+                Higher alpha = stronger boost at low coherence. Default 2.0.
         """
         super().__init__()
         self.action_dim = action_dim
         self.k = coupling_strength
         self.num_attractors = num_attractors
+        self.adaptive_coupling = adaptive_coupling
+        self.adaptive_alpha = adaptive_alpha
 
         # Motor attractors (the "vocabulary" of actions)
         self.attractor_centers = nn.Parameter(
@@ -139,11 +152,18 @@ class MirrorResonance(nn.Module):
         # CRITICAL: Kuramoto coupling - phase-lock to observed rhythm
         # This is the "mirror" - same attractors, external drive
         phase_diff = observed_phase.mean(dim=0) - self.phases
-        d_phase = self.attractor_frequencies * 2 * math.pi * dt + self.k * torch.sin(phase_diff)
-        self.phases = (self.phases + d_phase) % (2 * math.pi)
 
         # Compute entrainment quality (how well we're synchronized)
         coherence = torch.cos(phase_diff).mean()
+
+        # Adaptive coupling: boost when coherence is low
+        if self.adaptive_coupling:
+            k_effective = self.k * (1.0 + self.adaptive_alpha * (1.0 - coherence.detach()))
+        else:
+            k_effective = self.k
+
+        d_phase = self.attractor_frequencies * 2 * math.pi * dt + k_effective * torch.sin(phase_diff)
+        self.phases = (self.phases + d_phase) % (2 * math.pi)
 
         # Generate mirrored internal state (covert imitation)
         oscillation = torch.cos(self.phases)
@@ -712,6 +732,11 @@ class TheoryOfMind(nn.Module):
 
     Uses mirror resonance to model other agents' internal states
     and predict their next actions based on phase evolution.
+
+    No external training loop required. Phase models update online
+    via a fixed 0.3 update rate in observe_agent(). Approximately
+    100-200 observations are needed for the phase model to converge
+    to a good representation of the target agent's behavior.
     """
 
     def __init__(self,

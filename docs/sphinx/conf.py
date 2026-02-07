@@ -26,6 +26,7 @@ extensions = [
     'sphinx.ext.mathjax',           # Render LaTeX math
     'sphinx.ext.githubpages',       # GitHub Pages support
     'sphinx_autodoc_typehints',     # Better type hint rendering
+    'myst_parser',                  # Render Markdown (.md) files
 ]
 
 # Autosummary settings
@@ -93,7 +94,10 @@ html_theme_options = {
 autodoc_mock_imports = ['torch', 'numpy', 'noise', 'sklearn', 'scipy']
 
 # Source suffix
-source_suffix = '.rst'
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
 
 # Master doc
 master_doc = 'index'

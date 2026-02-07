@@ -178,7 +178,7 @@ class WilsonCowanPopulation(nn.Module):
             recent = self.E_history[:n_valid]
             oscillation_power = recent.var()
         else:
-            oscillation_power = torch.tensor(0.0)
+            oscillation_power = torch.tensor(0.0, device=self.E_history.device)
 
         return {
             'E': E,
@@ -201,7 +201,7 @@ class WilsonCowanPopulation(nn.Module):
 
         n_valid = min(self.hist_ptr.item(), 500)
         if n_valid < 20:
-            return torch.tensor(0.0)
+            return torch.tensor(0.0, device=self.E_history.device)
 
         signal = self.E_history[:n_valid]
         signal = signal - signal.mean()  # Remove DC
@@ -275,7 +275,7 @@ class WilsonCowanNetwork(nn.Module):
         """
         for _ in range(steps):
             # Get current E states for coupling
-            E_states = torch.tensor([p.E.item() for p in self.populations])
+            E_states = torch.stack([p.E.detach() for p in self.populations])
             mean_E = E_states.mean()
 
             for i, pop in enumerate(self.populations):
@@ -288,8 +288,8 @@ class WilsonCowanNetwork(nn.Module):
 
                 pop(steps=1, I_ext_E=coupling_input.item() + ext)
 
-        E_final = torch.tensor([p.E.item() for p in self.populations])
-        I_final = torch.tensor([p.I.item() for p in self.populations])
+        E_final = torch.stack([p.E.detach() for p in self.populations])
+        I_final = torch.stack([p.I.detach() for p in self.populations])
 
         # Synchronization: std of E activities (low std = synchronized)
         sync = 1.0 - E_final.std().clamp(max=1.0)

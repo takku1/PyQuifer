@@ -521,8 +521,7 @@ class STDPLayer(nn.Module):
 
             # Apply weight updates with bounds (STDP + homeostatic)
             with torch.no_grad():
-                self.weights.data = torch.clamp(
-                    self.weights.data + dw_plus + dw_minus + dw_homeo,
+                self.weights.add_(dw_plus + dw_minus + dw_homeo).clamp_(
                     self.w_min, self.w_max
                 )
 

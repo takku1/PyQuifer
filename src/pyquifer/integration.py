@@ -18,7 +18,7 @@ The loop:
   11. Neuromodulation → DA/5-HT/NE/ACh
   12. Output → modulation parameters for LLM
 
-Not all modules are required. The cycle gracefully skips missing components.
+All submodules are imported from the pyquifer package (no external optional deps).
 
 References:
 - Friston (2010). The free-energy principle: a unified brain theory?
@@ -119,8 +119,8 @@ class CognitiveCycle(nn.Module):
     One tick of the full cognitive loop.
 
     Wires together all PyQuifer modules into a coordinated cycle.
-    Missing modules are gracefully skipped — you can build up
-    the cognitive architecture incrementally.
+    All submodules are internal to pyquifer and imported at init time.
+    Use CycleConfig flags to enable/disable optional subsystems.
 
     Usage:
         config = CycleConfig.default()
@@ -447,10 +447,9 @@ class CognitiveCycle(nn.Module):
 
         # ── Step 7: Causal flow (dominance detection) ──
         # Use HPC error norms at each level as level activations
-        level_activations = torch.tensor(
-            [err.norm().item() for err in hpc_result['errors']],
-            device=device,
-        )
+        level_activations = torch.stack(
+            [err.norm() for err in hpc_result['errors']]
+        ).to(device)
         dom_result = self.dominance(level_activations, compute_every=10)
         dominance_ratio = dom_result['dominance_ratio'].item()
         processing_mode = dom_result['mode']

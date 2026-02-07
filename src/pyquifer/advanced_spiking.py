@@ -497,7 +497,7 @@ class EligibilityModulatedSTDP(nn.Module):
             # Three-factor rule: Δw = lr * reward * eligibility
             # reward.item() intentionally severs graph — R-STDP uses reward as a
             # neuromodulatory scalar, not a differentiable signal (biological fidelity).
-            self.weight.data += self.lr * reward.item() * self.eligibility
+            self.weight.add_(self.lr * reward.item() * self.eligibility)
 
             # Reset eligibility after reward
             self.eligibility.zero_()
@@ -654,7 +654,7 @@ class EpropSTDP(nn.Module):
         """
         with torch.no_grad():
             # Three-factor rule: dw = lr * reward * eligibility
-            self.weight.data += self.lr * reward.item() * self.eligibility
+            self.weight.add_(self.lr * reward.item() * self.eligibility)
 
             # Reset eligibility after reward
             self.eligibility.zero_()

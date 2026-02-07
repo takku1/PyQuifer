@@ -237,8 +237,7 @@ class SelectionArena(nn.Module):
 
         # Combined output (resource-weighted sum)
         combined = torch.stack(group_outputs, dim=0)
-        weights = torch.tensor([g.activation_level.item() for g in self.groups],
-                               device=input.device)
+        weights = torch.stack([g.activation_level.detach() for g in self.groups]).to(input.device)
         weights = weights / (weights.sum() + 1e-8)
 
         if combined.dim() == 2:
@@ -260,7 +259,7 @@ class SelectionArena(nn.Module):
         with torch.no_grad():
             self.step_count.add_(1)
 
-        resources = torch.tensor([g.resources.item() for g in self.groups])
+        resources = torch.stack([g.resources.detach() for g in self.groups])
 
         return {
             'output': output,
@@ -603,8 +602,7 @@ class SpeciatedSelectionArena(nn.Module):
 
         # Combined output
         combined = torch.stack(group_outputs, dim=0)
-        weights = torch.tensor([g.activation_level.item() for g in self.groups],
-                               device=input.device)
+        weights = torch.stack([g.activation_level.detach() for g in self.groups]).to(input.device)
         weights = weights / (weights.sum() + 1e-8)
 
         if combined.dim() == 2:
@@ -623,7 +621,7 @@ class SpeciatedSelectionArena(nn.Module):
         with torch.no_grad():
             self.step_count.add_(1)
 
-        resources = torch.tensor([g.resources.item() for g in self.groups])
+        resources = torch.stack([g.resources.detach() for g in self.groups])
 
         return {
             'output': output,
@@ -676,8 +674,8 @@ if __name__ == '__main__':
         input = target + torch.randn(16) * 0.3
         result = arena(input, global_coherence=target)
 
-    print(f"   Fitnesses: {result['fitnesses'].detach().numpy().round(3)}")
-    print(f"   Resources: {result['resources'].detach().numpy().round(3)}")
+    print(f"   Fitnesses: {result['fitnesses'].detach().cpu().numpy().round(3)}")
+    print(f"   Resources: {result['resources'].detach().cpu().numpy().round(3)}")
     print(f"   Mean fitness: {result['mean_fitness'].item():.3f}")
     print(f"   Fitness variance: {result['fitness_variance'].item():.4f}")
 
@@ -692,7 +690,7 @@ if __name__ == '__main__':
         sym_result = symbiosis(result['group_outputs'])
 
     print(f"   Symbiotic bonds: {sym_result['num_bonds'].item()}")
-    print(f"   MI matrix:\n{sym_result['mi_matrix'].detach().numpy().round(3)}")
+    print(f"   MI matrix:\n{sym_result['mi_matrix'].detach().cpu().numpy().round(3)}")
     bonded = symbiosis.get_bonded_groups()
     if bonded:
         print(f"   Bonded pairs: {bonded}")
@@ -709,7 +707,7 @@ if __name__ == '__main__':
             result = arena3(input, global_coherence=target)
 
     resources = result['resources']
-    print(f"   Final resources: {resources.detach().numpy().round(3)}")
+    print(f"   Final resources: {resources.detach().cpu().numpy().round(3)}")
     print(f"   Resource ratio (max/min): {resources.max().item() / resources.min().item():.2f}")
     print(f"   (Higher ratio = more specialization)")
 

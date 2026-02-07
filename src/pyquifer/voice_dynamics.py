@@ -102,7 +102,7 @@ class SpeechOscillator(nn.Module):
             SpeechRhythm with timing parameters
         """
         # Base phase evolution (as tensor for consistent handling)
-        d_phase = torch.tensor(2 * math.pi * self.base_rate * self.dt)
+        d_phase = torch.tensor(2 * math.pi * self.base_rate * self.dt, device=self.phase.device)
 
         # Coupling to main bands (if provided)
         if theta_phase is not None:
@@ -369,32 +369,34 @@ class VoiceDynamicsSystem(nn.Module):
                 neuromodulator_state.norepinephrine,
                 neuromodulator_state.acetylcholine,
                 neuromodulator_state.cortisol
-            ])
+            ], device=self.speech_osc.phase.device)
         else:
             effects = VoiceEffects(
                 pitch_range=1.0, energy=1.0, warmth=0.5,
                 rate_modifier=1.0, attack=0.5, urgency=0.3,
                 emphasis=0.5, clarity=0.7
             )
-            neuro_tensor = torch.ones(5) * 0.5
+            neuro_tensor = torch.ones(5, device=self.speech_osc.phase.device) * 0.5
 
         # Generate style vector
         # Create dummy band tensors if not provided
-        dummy = torch.zeros(4)
+        dev = self.speech_osc.phase.device
+        dummy = torch.zeros(4, device=dev)
+        _zero = torch.tensor(0.0, device=dev)
         band_phases = torch.stack([
-            theta_phase.mean() if theta_phase is not None else torch.tensor(0.0),
-            alpha_phase.mean() if alpha_phase is not None else torch.tensor(0.0),
-            torch.tensor(0.0),  # beta
-            gamma_phase.mean() if gamma_phase is not None else torch.tensor(0.0),
+            theta_phase.mean() if theta_phase is not None else _zero,
+            alpha_phase.mean() if alpha_phase is not None else _zero,
+            _zero,  # beta
+            gamma_phase.mean() if gamma_phase is not None else _zero,
         ])
 
         style = self.prosody_mod(
             band_phases=band_phases,
             band_coherences=dummy + 0.5,
             band_amplitudes=dummy + 0.5,
-            band_frequencies=torch.tensor([6.0, 10.0, 18.0, 40.0]),
+            band_frequencies=torch.tensor([6.0, 10.0, 18.0, 40.0], device=dev),
             neuromodulators=neuro_tensor,
-            global_coherence=torch.tensor(global_coherence),
+            global_coherence=torch.tensor(global_coherence, device=dev),
             speech_rhythm=rhythm
         )
 

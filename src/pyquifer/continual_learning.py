@@ -790,7 +790,7 @@ class ContinualLearner(nn.Module):
             self.si.update_running_importance()
 
         if self.mesu is not None:
-            self.mesu.update(torch.tensor(0.0))  # Loss not needed
+            self.mesu.update(torch.tensor(0.0, device=next(self.parameters()).device))  # Loss not needed
 
     def consolidate_task(self, dataloader, task_name: str = ""):
         """

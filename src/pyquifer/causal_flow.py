@@ -367,8 +367,8 @@ class DominanceDetector(nn.Module):
 
         n_valid = min(self.hist_ptr.item(), self.buffer_size)
 
-        bottom_up_te = torch.tensor(0.0)
-        top_down_te = torch.tensor(0.0)
+        bottom_up_te = torch.tensor(0.0, device=level_activations.device)
+        top_down_te = torch.tensor(0.0, device=level_activations.device)
 
         if n_valid >= 20 and self.hist_ptr % compute_every == 0:
             series = self.level_history[:n_valid]
@@ -381,8 +381,8 @@ class DominanceDetector(nn.Module):
                 bu += self.te_estimator.compute_te(series[:, i], series[:, i + 1])
                 td += self.te_estimator.compute_te(series[:, i + 1], series[:, i])
 
-            bottom_up_te = torch.tensor(bu)
-            top_down_te = torch.tensor(td)
+            bottom_up_te = torch.tensor(bu, device=level_activations.device)
+            top_down_te = torch.tensor(td, device=level_activations.device)
 
             total = bu + td + 1e-8
             with torch.no_grad():
@@ -436,7 +436,7 @@ if __name__ == '__main__':
         cfm.record(states.clone())
 
     flow_result = cfm.compute_flow()
-    print(f"   Driver scores: {flow_result['driver_scores'].detach().numpy().round(3)}")
+    print(f"   Driver scores: {flow_result['driver_scores'].detach().cpu().numpy().round(3)}")
     print(f"   (Population 0 should be strongest driver)")
 
     # Example 3: Dominance Detection
