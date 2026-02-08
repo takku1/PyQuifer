@@ -456,6 +456,138 @@ class MemoryReconsolidation(nn.Module):
         }
 
 
+class SleepReplayConsolidation(nn.Module):
+    """
+    SRC: Hebbian sleep-phase weight update prevents catastrophic forgetting.
+
+    1. Inject noise at input during "sleep"
+    2. Propagate forward through network
+    3. Apply local Hebbian rule:
+       dw_ij = eta * H(post_j) * (2 * H(pre_i) - 1)
+    4. Weight structure recreates previously learned patterns from noise
+
+    Ref: Tadros et al. (2022), Nature Communications.
+    """
+
+    def __init__(self, layer_dims: List[int], sleep_lr: float = 0.001,
+                 noise_scale: float = 1.0, num_replay_steps: int = 100):
+        """
+        Args:
+            layer_dims: Dimensions of each layer [input, hidden1, ..., output]
+            sleep_lr: Learning rate for Hebbian updates during sleep
+            noise_scale: Standard deviation of noise injection
+            num_replay_steps: Default number of sleep replay steps
+        """
+        super().__init__()
+        self.layer_dims = layer_dims
+        self.sleep_lr = sleep_lr
+        self.noise_scale = noise_scale
+        self.num_replay_steps = num_replay_steps
+
+        # Internal weight copies (the "memory" to consolidate)
+        self.layers = nn.ModuleList([
+            nn.Linear(layer_dims[i], layer_dims[i + 1], bias=False)
+            for i in range(len(layer_dims) - 1)
+        ])
+
+        self.register_buffer('total_sleep_steps', torch.tensor(0))
+
+    def set_weights_from_network(self, layers: List[nn.Linear]):
+        """
+        Copy weights from trained network for consolidation.
+
+        Args:
+            layers: List of nn.Linear layers to consolidate
+        """
+        with torch.no_grad():
+            for internal, external in zip(self.layers, layers):
+                internal.weight.copy_(external.weight)
+
+    def sleep_step(self, noise_input: Optional[torch.Tensor] = None) -> Dict:
+        """
+        One sleep replay step. Propagate noise, apply Hebbian update.
+
+        Args:
+            noise_input: Optional noise vector. If None, random Gaussian noise is generated.
+
+        Returns:
+            Dict with weight_delta_norms, activations
+        """
+        device = self.layers[0].weight.device
+
+        # Generate noise input
+        if noise_input is None:
+            noise_input = torch.randn(self.layer_dims[0], device=device) * self.noise_scale
+
+        # Forward propagation through copies
+        activations = [noise_input]
+        x = noise_input
+        for layer in self.layers:
+            x = torch.tanh(layer(x))
+            activations.append(x)
+
+        # Apply Hebbian update to each layer
+        delta_norms = []
+        with torch.no_grad():
+            for i, layer in enumerate(self.layers):
+                pre = activations[i]
+                post = activations[i + 1]
+
+                # Heaviside binarization
+                h_post = (post > 0).float()
+                h_pre = (pre > 0).float()
+
+                # Hebbian rule: dw = eta * H(post) * (2*H(pre) - 1)
+                delta_w = self.sleep_lr * torch.outer(h_post, 2.0 * h_pre - 1.0)
+                layer.weight.add_(delta_w)
+
+                delta_norms.append(delta_w.norm().item())
+
+            self.total_sleep_steps.add_(1)
+
+        return {
+            'weight_delta_norms': delta_norms,
+            'activations': [a.detach() for a in activations],
+            'noise_input': noise_input.detach(),
+        }
+
+    def sleep_cycle(self, num_steps: Optional[int] = None) -> Dict:
+        """
+        Full sleep cycle. Returns consolidation metrics.
+
+        Args:
+            num_steps: Number of sleep steps. Uses default if None.
+
+        Returns:
+            Dict with mean_delta_norm, total_steps, per_layer_changes
+        """
+        steps = num_steps or self.num_replay_steps
+        all_delta_norms = []
+
+        for _ in range(steps):
+            result = self.sleep_step()
+            all_delta_norms.append(result['weight_delta_norms'])
+
+        # Aggregate metrics
+        delta_tensor = torch.tensor(all_delta_norms)  # (steps, num_layers)
+        per_layer_mean = delta_tensor.mean(dim=0)
+
+        return {
+            'mean_delta_norm': delta_tensor.mean().item(),
+            'per_layer_changes': per_layer_mean.tolist(),
+            'total_steps': steps,
+            'total_sleep_steps': self.total_sleep_steps.item(),
+        }
+
+    def get_weights(self) -> List[torch.Tensor]:
+        """Return current weight matrices."""
+        return [layer.weight.detach().clone() for layer in self.layers]
+
+    def reset(self):
+        """Reset sleep counter (weights are preserved)."""
+        self.total_sleep_steps.zero_()
+
+
 if __name__ == '__main__':
     print("--- Memory Consolidation Examples ---")
 

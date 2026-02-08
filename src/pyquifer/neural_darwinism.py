@@ -470,7 +470,8 @@ class SymbiogenesisDetector(nn.Module):
         n_valid = min(self.hist_ptr.item(), self.buffer_size)
 
         # Compute pairwise MI
-        mi_matrix = torch.zeros(self.num_groups, self.num_groups)
+        mi_matrix = torch.zeros(self.num_groups, self.num_groups,
+                                device=self.bonds.device)
         if n_valid >= 20:
             for i in range(self.num_groups):
                 for j in range(i + 1, self.num_groups):

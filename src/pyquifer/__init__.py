@@ -311,6 +311,24 @@ __all__ = [
     "EvidenceSource",
     "EvidenceAggregator",
     "HypothesisProfile",
+    # Phase 8: Training core
+    "EquilibriumPropagationTrainer",
+    "EPKuramotoClassifier",
+    "OscillationGatedPlasticity",
+    "ThreeFactorRule",
+    "OscillatoryPredictiveCoding",
+    "SleepReplayConsolidation",
+    "DendriticNeuron",
+    "DendriticStack",
+    # Phase 9: Organ protocol + GWT wiring
+    "Organ",
+    "Proposal",
+    "OscillatoryWriteGate",
+    "PreGWAdapter",
+    "HPCOrgan",
+    "MotivationOrgan",
+    "SelectionOrgan",
+    "DiversityTracker",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -662,6 +680,26 @@ _LAZY_IMPORTS = {
     "EvidenceSource": (".metacognitive", "EvidenceSource"),
     "EvidenceAggregator": (".metacognitive", "EvidenceAggregator"),
     "HypothesisProfile": (".neural_darwinism", "HypothesisProfile"),
+
+    # Phase 8: Training core
+    "EquilibriumPropagationTrainer": (".equilibrium_propagation", "EquilibriumPropagationTrainer"),
+    "EPKuramotoClassifier": (".equilibrium_propagation", "EPKuramotoClassifier"),
+    "OscillationGatedPlasticity": (".learning", "OscillationGatedPlasticity"),
+    "ThreeFactorRule": (".learning", "ThreeFactorRule"),
+    "OscillatoryPredictiveCoding": (".hierarchical_predictive", "OscillatoryPredictiveCoding"),
+    "SleepReplayConsolidation": (".memory_consolidation", "SleepReplayConsolidation"),
+    "DendriticNeuron": (".dendritic", "DendriticNeuron"),
+    "DendriticStack": (".dendritic", "DendriticStack"),
+
+    # Phase 9: Organ protocol + GWT wiring
+    "Organ": (".organ", "Organ"),
+    "Proposal": (".organ", "Proposal"),
+    "OscillatoryWriteGate": (".organ", "OscillatoryWriteGate"),
+    "PreGWAdapter": (".organ", "PreGWAdapter"),
+    "HPCOrgan": (".organ", "HPCOrgan"),
+    "MotivationOrgan": (".organ", "MotivationOrgan"),
+    "SelectionOrgan": (".organ", "SelectionOrgan"),
+    "DiversityTracker": (".global_workspace", "DiversityTracker"),
 }
 
 # Cache for loaded attributes

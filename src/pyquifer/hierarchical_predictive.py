@@ -327,6 +327,145 @@ class HierarchicalPredictiveCoding(nn.Module):
             level.reset()
 
 
+class OscillatoryPredictiveCoding(nn.Module):
+    """
+    Predictive coding with frequency-specific routing.
+
+    - Alpha/Beta (top-down): predictions suppress expected inputs
+    - Gamma (bottom-up): prediction errors enhanced for unexpected stimuli
+    - Strong predictions suppress gamma -> less learning
+    - Weak predictions produce strong gamma -> more learning
+
+    Learning rate modulated by prediction error magnitude.
+
+    References:
+    - Bastos et al. (2012). Canonical microcircuits for predictive coding.
+    - Arnal & Giraud (2012). Cortical oscillations and sensory predictions.
+    - Michalareas et al. (2016). Alpha-beta and gamma rhythms subserve
+      feedback and feedforward influences.
+    """
+
+    def __init__(self, dims: List[int], lr: float = 0.01, inference_steps: int = 10,
+                 alpha_beta_freq: float = 10.0, gamma_freq: float = 40.0):
+        """
+        Args:
+            dims: Dimensions of each layer [input, hidden1, ..., top]
+            lr: Base learning rate for weight updates
+            inference_steps: Steps for inference (num_iterations for HPC)
+            alpha_beta_freq: Alpha/beta band frequency (Hz) for top-down
+            gamma_freq: Gamma band frequency (Hz) for bottom-up
+        """
+        super().__init__()
+        self.dims = dims
+        self.lr = lr
+        self.inference_steps = inference_steps
+        self.alpha_beta_freq = alpha_beta_freq
+        self.gamma_freq = gamma_freq
+
+        # Use HierarchicalPredictiveCoding (proven convergence, not learning.PredictiveCoding)
+        self.hpc = HierarchicalPredictiveCoding(
+            level_dims=dims,
+            lr=lr,
+            gen_lr=lr,
+            num_iterations=max(1, inference_steps // 3),
+        )
+
+        self.register_buffer('step_count', torch.tensor(0))
+
+    def _compute_oscillatory_modulation(self, slow_phase: Optional[torch.Tensor] = None):
+        """Compute gamma and alpha/beta modulation from current step or slow phase."""
+        if slow_phase is not None:
+            phase = slow_phase.item() if isinstance(slow_phase, torch.Tensor) else slow_phase
+        else:
+            t = self.step_count.item() * 0.001  # Convert to seconds
+            phase = 2 * math.pi * self.alpha_beta_freq * t
+
+        # Alpha/beta modulation: top-down predictions strongest at peak
+        alpha_beta_mod = (1.0 + math.cos(phase)) / 2.0
+
+        # Gamma modulation: bottom-up errors strongest at trough (anti-phase)
+        gamma_mod = (1.0 + math.cos(phase + math.pi)) / 2.0
+
+        return alpha_beta_mod, gamma_mod
+
+    def forward(self, x: torch.Tensor, slow_phase: Optional[torch.Tensor] = None) -> Dict:
+        """
+        Inference + frequency-tagged errors.
+
+        Args:
+            x: Input tensor (batch, dims[0]) or (dims[0],)
+            slow_phase: Optional slow oscillation phase for cross-frequency coupling
+
+        Returns:
+            Dict with errors, predictions, gamma_power, alpha_beta_power,
+            free_energy, states
+        """
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        alpha_beta_mod, gamma_mod = self._compute_oscillatory_modulation(slow_phase)
+
+        # Run hierarchical predictive coding
+        hpc_result = self.hpc(x)
+        errors = hpc_result['errors']
+        predictions = hpc_result['predictions']
+        free_energy = hpc_result['free_energy']
+
+        # Tag errors with gamma amplitude (bottom-up enhancement)
+        gamma_tagged_errors = [err * gamma_mod for err in errors]
+
+        # Tag predictions with alpha/beta (top-down suppression)
+        alpha_tagged_predictions = [pred * alpha_beta_mod for pred in predictions]
+
+        # Compute power measures
+        gamma_power = sum(e.pow(2).mean() for e in gamma_tagged_errors)
+        alpha_beta_power = sum(p.pow(2).mean() for p in alpha_tagged_predictions)
+
+        with torch.no_grad():
+            self.step_count.add_(1)
+
+        return {
+            'errors': errors,
+            'gamma_tagged_errors': gamma_tagged_errors,
+            'predictions': predictions,
+            'alpha_tagged_predictions': alpha_tagged_predictions,
+            'gamma_power': gamma_power,
+            'alpha_beta_power': alpha_beta_power,
+            'free_energy': free_energy,
+            'beliefs': hpc_result.get('beliefs', []),
+        }
+
+    def learn(self, x: torch.Tensor, slow_phase: Optional[torch.Tensor] = None) -> Dict:
+        """
+        Learn with oscillation-modulated error routing.
+
+        HPC's forward() already does online learning via PredictiveLevel.gen_lr.
+        We just call forward (which updates beliefs + generative models),
+        then tag errors with gamma/alpha-beta modulation for routing.
+
+        Args:
+            x: Input tensor
+            slow_phase: Optional slow oscillation phase
+
+        Returns:
+            Dict with learning metrics
+        """
+        # HPC forward already does online learning internally
+        result = self.forward(x, slow_phase)
+
+        return {
+            'free_energy': result['free_energy'],
+            'gamma_power': result['gamma_power'],
+            'alpha_beta_power': result['alpha_beta_power'],
+            'errors': [e.pow(2).mean() for e in result['errors']],
+        }
+
+    def reset(self):
+        """Reset internal state."""
+        self.step_count.zero_()
+        self.hpc.reset()
+
+
 if __name__ == '__main__':
     print("--- Hierarchical Predictive Coding Examples ---")
 

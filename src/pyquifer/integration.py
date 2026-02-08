@@ -100,6 +100,21 @@ class CycleConfig:
     use_no_progress: bool = False           # Stagnation detection
     use_phase_cache: bool = False           # Phase topology Bayesian prior
 
+    # Phase 9: Global Workspace / Organ protocol
+    use_global_workspace: bool = False      # Enable GWT workspace competition
+    workspace_dim: int = 256                # Common workspace dimension
+    gw_n_winners: int = 1                   # Number of competition winners
+    gw_cycle_consistency: bool = False       # Cycle-consistency loss for adapters
+    gw_diversity_pressure: float = 0.1      # Anti-collapse pressure
+
+    # Phase 8: Training core
+    use_ep_training: bool = False           # Equilibrium Propagation for Kuramoto
+    use_oscillation_gated_plasticity: bool = False  # Theta-phase gated learning
+    use_three_factor: bool = False          # Three-factor learning rule
+    use_oscillatory_predictive: bool = False # Frequency-specific predictive coding
+    use_sleep_consolidation: bool = False   # SRC Hebbian sleep update
+    use_dendritic_credit: bool = False      # Two-compartment dendritic neurons
+
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
@@ -297,6 +312,62 @@ class CognitiveCycle(nn.Module):
                 integration_method=c.integration_method,
             )
 
+        # === Phase 8 Training Core ===
+        self._ep_trainer = None
+        self._oscillation_gated = None
+        self._three_factor = None
+        self._oscillatory_predictive = None
+        self._sleep_consolidation = None
+        self._dendritic_stack = None
+
+        if c.use_ep_training:
+            from pyquifer.equilibrium_propagation import EquilibriumPropagationTrainer
+            self._ep_trainer = EquilibriumPropagationTrainer(
+                self.oscillators, lr=0.01, beta=0.1,
+                free_steps=100, nudge_steps=100,
+            )
+
+        if c.use_oscillation_gated_plasticity:
+            from pyquifer.learning import OscillationGatedPlasticity
+            self._oscillation_gated = OscillationGatedPlasticity(
+                shape=(c.hierarchy_dims[0],),
+                preferred_phase=math.pi,
+                decay_rate=0.95,
+            )
+
+        if c.use_three_factor:
+            from pyquifer.learning import ThreeFactorRule
+            self._three_factor = ThreeFactorRule(
+                input_dim=c.hierarchy_dims[0],
+                output_dim=c.hierarchy_dims[0],
+                trace_decay=0.95,
+                homeostatic_target=0.1,
+            )
+
+        if c.use_oscillatory_predictive:
+            from pyquifer.hierarchical_predictive import OscillatoryPredictiveCoding
+            self._oscillatory_predictive = OscillatoryPredictiveCoding(
+                dims=c.hierarchy_dims,
+                lr=c.hpc_lr,
+                inference_steps=5,
+            )
+
+        if c.use_sleep_consolidation:
+            from pyquifer.memory_consolidation import SleepReplayConsolidation
+            self._sleep_consolidation = SleepReplayConsolidation(
+                layer_dims=c.hierarchy_dims,
+                sleep_lr=0.001,
+                noise_scale=1.0,
+                num_replay_steps=50,
+            )
+
+        if c.use_dendritic_credit:
+            from pyquifer.dendritic import DendriticStack
+            self._dendritic_stack = DendriticStack(
+                dims=c.hierarchy_dims,
+                lr=0.01,
+            )
+
         # === Phase 7 Optional Modules ===
         self._no_progress = None
         self._evidence_aggregator = None
@@ -314,6 +385,27 @@ class CognitiveCycle(nn.Module):
             from pyquifer.oscillators import PhaseTopologyCache
             self._phase_cache = PhaseTopologyCache(capacity=1000)
 
+        # === Phase 9: Global Workspace / Organ Protocol ===
+        self._organs = []  # List of (organ, adapter) tuples
+        self._gw = None
+        self._write_gate = None
+        self._diversity_tracker = None
+
+        if c.use_global_workspace:
+            from pyquifer.global_workspace import GlobalWorkspace, DiversityTracker
+            from pyquifer.organ import OscillatoryWriteGate
+            self._gw = GlobalWorkspace(
+                content_dim=c.workspace_dim,
+                workspace_dim=c.workspace_dim,
+                n_slots=8,
+                n_winners=c.gw_n_winners,
+                context_dim=c.workspace_dim,
+            )
+            self._write_gate = OscillatoryWriteGate()
+            self._diversity_tracker = DiversityTracker(
+                pressure=c.gw_diversity_pressure,
+            )
+
         # === Projection layers (bridge mismatched dimensions) ===
         # Project oscillator phases to state_dim for various modules
         self.phase_to_state = nn.Linear(c.num_oscillators, c.state_dim, bias=False)
@@ -329,6 +421,104 @@ class CognitiveCycle(nn.Module):
             self.state_to_group = nn.Linear(c.state_dim, c.group_dim, bias=False)
         else:
             self.state_to_group = nn.Identity()
+
+    def register_organ(self, organ, adapter=None):
+        """
+        Register a specialist organ for workspace competition.
+
+        Args:
+            organ: Organ instance (must implement observe/propose/accept)
+            adapter: Optional PreGWAdapter. If None and workspace is enabled,
+                    one will be created automatically.
+        """
+        if adapter is None and self.config.use_global_workspace:
+            from pyquifer.organ import PreGWAdapter
+            adapter = PreGWAdapter(
+                organ_dim=organ.latent_dim,
+                workspace_dim=self.config.workspace_dim,
+            )
+        self._organs.append((organ, adapter))
+
+    def _run_workspace_competition(self, sensory_input: torch.Tensor,
+                                    phases: torch.Tensor) -> Dict[str, Any]:
+        """
+        Run global workspace competition among registered organs.
+
+        Returns dict with broadcast tensor and competition metadata.
+        """
+        if not self._organs or self._gw is None:
+            return {}
+
+        device = sensory_input.device
+        global_phase = phases.mean()  # Use mean phase as global rhythm
+
+        # 1. Each organ observes + proposes
+        proposals = []
+        for organ, adapter in self._organs:
+            organ.step_oscillator(dt=self.config.oscillator_dt,
+                                  global_phase=global_phase)
+            organ.observe(sensory_input)
+            proposal = organ.propose()
+
+            # Apply oscillatory write gate
+            gate_val = self._write_gate(
+                organ.phase, global_phase,
+                novelty=min(proposal.salience, 1.0),
+            ).item()
+
+            # Apply diversity pressure
+            boost = self._diversity_tracker.get_boost(organ.organ_id)
+            proposal.salience = proposal.salience * gate_val + boost
+
+            proposals.append((organ, adapter, proposal))
+
+        # 2. Project to workspace dim and run competition
+        ws_dim = self.config.workspace_dim
+        n_items = len(proposals)
+        contents = torch.zeros(1, n_items, ws_dim, device=device)
+        saliences = torch.zeros(1, n_items, device=device)
+
+        for i, (organ, adapter, proposal) in enumerate(proposals):
+            if adapter is not None:
+                projected = adapter.encode(proposal.content.unsqueeze(0))
+                contents[0, i] = projected.squeeze(0)
+            else:
+                # Pad/trim to workspace_dim
+                src = proposal.content
+                dim = min(src.shape[-1], ws_dim)
+                contents[0, i, :dim] = src[:dim]
+            saliences[0, i] = proposal.salience
+
+        # Use contents as both content and context
+        gw_result = self._gw(contents, contents)
+
+        # 3. Broadcast winner back to all organs
+        broadcast = gw_result['workspace'].squeeze(0)  # (workspace_dim,)
+        winner_idx = gw_result['winners'][0].argmax().item()
+        winner_id = proposals[winner_idx][2].organ_id
+        self._diversity_tracker.record_win(winner_id)
+
+        for organ, adapter, proposal in proposals:
+            if adapter is not None:
+                organ_broadcast = adapter.decode(broadcast)
+            else:
+                organ_broadcast = broadcast[:organ.latent_dim]
+            organ.accept(organ_broadcast)
+
+        # 4. Cycle consistency loss
+        cc_loss = torch.tensor(0.0, device=device)
+        if self.config.gw_cycle_consistency:
+            for organ, adapter, proposal in proposals:
+                if adapter is not None:
+                    cc_loss = cc_loss + adapter.cycle_consistency_loss(proposal.content)
+
+        return {
+            'gw_broadcast': broadcast.detach(),
+            'gw_winner': winner_id,
+            'gw_saliences': saliences.detach().squeeze(0),
+            'gw_did_ignite': gw_result['did_ignite'].any().item(),
+            'gw_cycle_consistency_loss': cc_loss,
+        }
 
     def tick(self,
              sensory_input: torch.Tensor,
@@ -364,23 +554,15 @@ class CognitiveCycle(nn.Module):
 
         # ── Step 1b: Optional Stuart-Landau oscillator ──
         stuart_landau_info = {}
+        _sl_result = None
         if self._stuart_landau is not None:
-            sl_result = self._stuart_landau(steps=1)
-            stuart_landau_info = {
-                'amplitudes': sl_result['amplitudes'].detach(),
-                'sl_order_parameter': sl_result['order_parameter'].item(),
-                'criticality_distance_sl': self._stuart_landau.get_criticality_distance().item(),
-            }
+            _sl_result = self._stuart_landau(steps=1)
 
         # ── Step 1c: Optional Kuramoto-Daido mean-field ──
         mean_field_info = {}
+        _mf_result = None
         if self._mean_field is not None:
-            mf_result = self._mean_field(steps=1)
-            mean_field_info = {
-                'mf_R': mf_result['R'].item(),
-                'mf_Psi': mf_result['Psi'].item(),
-                'mf_synchronized': self._mean_field.is_synchronized(),
-            }
+            _mf_result = self._mean_field(steps=1)
 
         # ── Step 2: Criticality check ──
         # Use oscillator phases as activity signal
@@ -390,13 +572,9 @@ class CognitiveCycle(nn.Module):
 
         # ── Step 2b: Optional Koopman bifurcation detection ──
         koopman_info = {}
+        _koopman_result = None
         if self._koopman is not None:
-            koopman_result = self._koopman(sensory_input[0].detach())
-            koopman_info = {
-                'stability_margin': koopman_result['stability_margin'].item(),
-                'max_eigenvalue_mag': koopman_result['max_eigenvalue_mag'].item(),
-                'approaching_bifurcation': koopman_result['approaching_bifurcation'],
-            }
+            _koopman_result = self._koopman(sensory_input[0].detach())
 
         # ── Step 3: Neuromodulation ──
         # Update neuromodulator levels based on current signals
@@ -434,6 +612,18 @@ class CognitiveCycle(nn.Module):
             # Modulate enhanced input by STP output
             enhanced_input = enhanced_input * stp_result['psp'].unsqueeze(0)
 
+        # ── Step 4c: Optional oscillation-gated plasticity ──
+        theta_gate_value = 0.0
+        if self._oscillation_gated is not None:
+            # Use first oscillator phase as theta proxy
+            theta_phase = phases[0]
+            activity = (enhanced_input.squeeze(0) if enhanced_input.dim() > 1
+                        else enhanced_input)
+            # Only use first hierarchy_dims[0] elements
+            activity_for_gate = activity[:c.hierarchy_dims[0]]
+            self._oscillation_gated(activity_for_gate, theta_phase)
+            theta_gate_value = self._oscillation_gated.gate_value.item()
+
         # ── Step 5: Hierarchical Predictive Coding ──
         # Trim or pad input to match hierarchy bottom dimension
         bottom_dim = c.hierarchy_dims[0]
@@ -446,6 +636,15 @@ class CognitiveCycle(nn.Module):
                 hpc_input = torch.cat([enhanced_input, pad], dim=-1)
         else:
             hpc_input = enhanced_input
+
+        # Use oscillatory predictive coding if enabled, otherwise standard HPC
+        opc_info = {}
+        if self._oscillatory_predictive is not None:
+            opc_result = self._oscillatory_predictive.learn(hpc_input, slow_phase=phases[0:1])
+            opc_info = {
+                'gamma_power': opc_result['gamma_power'].item() if isinstance(opc_result['gamma_power'], torch.Tensor) else opc_result['gamma_power'],
+                'alpha_beta_power': opc_result['alpha_beta_power'].item() if isinstance(opc_result['alpha_beta_power'], torch.Tensor) else opc_result['alpha_beta_power'],
+            }
 
         hpc_result = self.hpc(hpc_input)
         prediction_error = hpc_result['errors'][0]  # Bottom-level errors
@@ -483,6 +682,11 @@ class CognitiveCycle(nn.Module):
         dominant_state = meta_result['dominant'].item()
         coalition_entropy = meta_result['coalition_entropy'].item()
 
+        # ── Step 8a: Global Workspace competition (if enabled) ──
+        gw_info = {}
+        if self.config.use_global_workspace and self._organs:
+            gw_info = self._run_workspace_competition(sensory_input[0], phases)
+
         # ── Step 8b: Optional Wilson-Cowan neural mass ──
         neural_mass_info = {}
         if self._neural_mass is not None:
@@ -518,6 +722,31 @@ class CognitiveCycle(nn.Module):
         self_result = self.self_model(blanket['internal_state'])
         narr_result = self.narrative(self_result['self_summary'])
 
+        # ── Step 11b: Three-factor learning ──
+        three_factor_info = {}
+        if self._three_factor is not None:
+            # Use bottom-level HPC input as pre-synaptic activity
+            pre_activity = hpc_input.squeeze(0) if hpc_input.dim() > 1 else hpc_input
+            self._three_factor(pre_activity)
+            # Modulate with dopamine level (first neuromodulator)
+            da_level = levels[0]
+            self._three_factor.modulated_update(da_level)
+            three_factor_info = {
+                'homeostatic_factor': self._three_factor.homeostatic_factor.mean().item(),
+            }
+
+        # ── Step 11c: Dendritic credit assignment ──
+        dendritic_info = {}
+        if self._dendritic_stack is not None:
+            # Run dendritic stack without top-down predictions (avoids dim mismatch)
+            # The dendritic layers learn their own top-down signals over time
+            stack_input = hpc_input.squeeze(0) if hpc_input.dim() > 1 else hpc_input
+            stack_result = self._dendritic_stack(stack_input)
+            learn_result = self._dendritic_stack.learn()
+            dendritic_info = {
+                'dendritic_mean_delta': learn_result['mean_delta_norm'],
+            }
+
         # ── Step 12: Memory (consolidation if sleeping) ──
         # Store experience
         self.episodic_buffer.store(
@@ -526,6 +755,7 @@ class CognitiveCycle(nn.Module):
         )
 
         consolidation_info = {'consolidated': False, 'num_traces': 0}
+        src_info = {}
         if sleep_signal > 0.3:
             replay = self.sharp_wave_ripple(self.episodic_buffer, sleep_signal=sleep_signal)
             if replay['replayed_states'].shape[0] > 0:
@@ -537,6 +767,29 @@ class CognitiveCycle(nn.Module):
                     'consolidated': cons['consolidated'].item() if isinstance(cons['consolidated'], torch.Tensor) else cons['consolidated'],
                     'num_traces': cons['num_traces'].item() if isinstance(cons['num_traces'], torch.Tensor) else cons['num_traces'],
                 }
+
+            # SRC Hebbian sleep consolidation
+            if self._sleep_consolidation is not None:
+                src_result = self._sleep_consolidation.sleep_step()
+                src_info = {
+                    'src_delta_norm': sum(src_result['weight_delta_norms']) / len(src_result['weight_delta_norms']),
+                }
+
+        # EP training (periodically, not every tick)
+        ep_info = {}
+        if self._ep_trainer is not None and self.tick_count.item() % 10 == 0:
+            # Use sensory input as external driving force (projected to oscillator dim)
+            ext = self.phase_to_state.weight.T @ sensory_input[0].detach()
+            # Simple loss: maximize order parameter
+            def _ep_loss(ph, _tgt):
+                complex_phases = torch.exp(1j * ph)
+                r = torch.abs(complex_phases.mean())
+                return (1.0 - r)  # Minimize 1-R
+            ep_result = self._ep_trainer.train_step(ext, _ep_loss, torch.tensor(0.0, device=device))
+            ep_info = {
+                'ep_loss': ep_result['loss'],
+                'ep_phase_shift': ep_result['phase_shift'],
+            }
 
         # ── Step 12b: Phase 7 optional modules ──
         phase7_info = {}
@@ -571,6 +824,26 @@ class CognitiveCycle(nn.Module):
             dominant_state, narr_result['identity_strength'].item()
         )
         attention_bias = attention_map.detach()
+
+        # Batch all deferred .item() calls at single sync point
+        if _sl_result is not None:
+            stuart_landau_info = {
+                'amplitudes': _sl_result['amplitudes'].detach(),
+                'sl_order_parameter': _sl_result['order_parameter'].item(),
+                'criticality_distance_sl': self._stuart_landau.get_criticality_distance().item(),
+            }
+        if _mf_result is not None:
+            mean_field_info = {
+                'mf_R': _mf_result['R'].item(),
+                'mf_Psi': _mf_result['Psi'].item(),
+                'mf_synchronized': self._mean_field.is_synchronized(),
+            }
+        if _koopman_result is not None:
+            koopman_info = {
+                'stability_margin': _koopman_result['stability_margin'].item(),
+                'max_eigenvalue_mag': _koopman_result['max_eigenvalue_mag'].item(),
+                'approaching_bifurcation': _koopman_result['approaching_bifurcation'],
+            }
 
         return {
             'modulation': {
@@ -623,6 +896,13 @@ class CognitiveCycle(nn.Module):
                 **stp_info,
                 **neural_mass_info,
                 **phase7_info,
+                **opc_info,
+                **three_factor_info,
+                **dendritic_info,
+                **src_info,
+                **ep_info,
+                **gw_info,
+                'theta_gate_value': theta_gate_value,
             },
         }
 
@@ -708,6 +988,19 @@ class CognitiveCycle(nn.Module):
             self._stp.reset()
         if self._neural_mass is not None:
             self._neural_mass.reset()
+
+        # Phase 8 training modules
+        if self._oscillation_gated is not None:
+            self._oscillation_gated.reset()
+        if self._three_factor is not None:
+            self._three_factor.reset()
+        if self._oscillatory_predictive is not None:
+            self._oscillatory_predictive.reset()
+        if self._sleep_consolidation is not None:
+            self._sleep_consolidation.reset()
+        if self._dendritic_stack is not None:
+            self._dendritic_stack.reset()
+        # EP trainer has no state to reset (bank phases are reset with oscillators)
 
         # Phase 7 optional modules
         if self._no_progress is not None:

@@ -301,7 +301,7 @@ class MetastabilityIndex(nn.Module):
             patterns = (active * powers).sum(dim=1)
             unique_patterns = patterns.unique()
             # Entropy of pattern distribution
-            counts = torch.stack([(patterns == p).sum().float() for p in unique_patterns])
+            counts = (patterns.unsqueeze(-1) == unique_patterns).sum(0).float()
             probs = counts / counts.sum()
             coalition_entropy = -(probs * torch.log(probs + 1e-8)).sum()
             max_entropy = math.log(min(n_valid, 2 ** self.num_populations))

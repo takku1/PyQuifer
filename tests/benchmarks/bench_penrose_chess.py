@@ -1538,5 +1538,119 @@ def main():
     print("\n  Benchmark complete.\n")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Three-Column Harness Integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_three_column_suite() -> None:
+    """Run the Penrose chess benchmark with three-column metric collection.
+
+    Produces JSON results in tests/benchmarks/results/chess.json compatible
+    with the unified report generator (generate_report.py).
+    """
+    from harness import BenchmarkSuite, MetricCollector, timer
+
+    suite = BenchmarkSuite("Chess & Strategic Reasoning Benchmarks")
+
+    # --- Scenario 1: Fortress Detection ---
+    fortress_positions = [
+        (PENROSE_FEN, DRAW, "Penrose original"),
+        (FORTRESS_FENS["same_color_bishop_v2"], DRAW, "Same-color bishops v2"),
+        (FORTRESS_FENS["rook_fortress"], DRAW, "Rook fortress"),
+        (FORTRESS_FENS["knight_fortress"], DRAW, "Knight fortress"),
+    ]
+
+    mc1 = MetricCollector("Fortress Detection")
+    mc1.record("A_published", "num_positions", float(len(fortress_positions)))
+    mc1.record("A_published", "fortress_accuracy", 1.0,
+               {"source": "Manual verification"})
+
+    correct_b, time_b = 0, 0.0
+    correct_c, time_c = 0, 0.0
+    confidences = []
+    for fen, expected, desc in fortress_positions:
+        with timer() as tb:
+            rb = run_minimax_baseline(fen, depth=2)
+        time_b += tb["elapsed_ms"]
+        if rb.verdict == expected:
+            correct_b += 1
+
+        with timer() as tc:
+            rc = run_pyquifer_pattern(fen)
+        time_c += tc["elapsed_ms"]
+        if rc.verdict == expected:
+            correct_c += 1
+        confidences.append(rc.confidence)
+
+    n = len(fortress_positions)
+    mc1.record("B_pytorch", "fortress_accuracy", round(correct_b / n, 4))
+    mc1.record("B_pytorch", "total_time_ms", round(time_b, 1))
+    mc1.record("C_pyquifer", "fortress_accuracy", round(correct_c / n, 4))
+    mc1.record("C_pyquifer", "total_time_ms", round(time_c, 1))
+    mc1.record("C_pyquifer", "mean_confidence",
+               round(sum(confidences) / len(confidences), 4))
+    suite.add(mc1)
+
+    # --- Scenario 2: Position Evaluation ---
+    tactical = [
+        ("8/8/8/8/1P6/1K6/8/1k6 w - - 0 1", WHITE_WINS, "Passed pawn"),
+        ("8/8/8/3k4/8/3K4/3Q4/8 w - - 0 1", WHITE_WINS, "K+Q vs K"),
+        ("8/8/8/3k4/8/3K4/8/8 w - - 0 1", DRAW, "K vs K"),
+    ]
+    all_positions = fortress_positions + tactical
+    mc2 = MetricCollector("Position Evaluation Accuracy")
+    mc2.record("A_published", "num_positions", float(len(all_positions)))
+    mc2.record("A_published", "accuracy", 1.0)
+
+    correct_b2, correct_c2, total_conf = 0, 0, 0.0
+    for fen, expected, _ in all_positions:
+        mb = run_material_analysis(fen)
+        if mb.verdict == expected:
+            correct_b2 += 1
+        rc = run_pyquifer_pattern(fen)
+        if rc.verdict == expected:
+            correct_c2 += 1
+        total_conf += rc.confidence
+    mc2.record("B_pytorch", "accuracy", round(correct_b2 / len(all_positions), 4))
+    mc2.record("C_pyquifer", "accuracy", round(correct_c2 / len(all_positions), 4))
+    mc2.record("C_pyquifer", "mean_confidence",
+               round(total_conf / len(all_positions), 4))
+    suite.add(mc2)
+
+    # --- Scenario 3: Engine Override ---
+    mc3 = MetricCollector("Engine Override (Intuition vs Calculation)")
+    mc3.record("A_published", "correct_verdict", 1.0,
+               {"note": "Human GM sees DRAW"})
+    mb = run_material_analysis(PENROSE_FEN)
+    mc3.record("B_pytorch", "verdict_correct",
+               1.0 if mb.verdict == DRAW else 0.0)
+    ov = run_engine_override(PENROSE_FEN, engine_eval=-28.0)
+    mc3.record("C_pyquifer", "verdict_correct",
+               1.0 if ov.final_verdict == DRAW else 0.0)
+    mc3.record("C_pyquifer", "override_confidence",
+               round(ov.override_confidence, 4))
+    suite.add(mc3)
+
+    # --- Scenario 4: Generalization ---
+    mc4 = MetricCollector("Fortress Generalization")
+    gen = run_generalization()
+    mc4.record("A_published", "num_positions", float(len(gen.results)))
+    mc4.record("A_published", "target_accuracy", 1.0)
+    mc4.record("C_pyquifer", "accuracy", round(gen.accuracy, 4))
+    mc4.record("C_pyquifer", "mean_confidence", round(gen.avg_confidence, 4))
+    for name, result in gen.results.items():
+        mc4.record("C_pyquifer", f"pos_{name}_correct",
+                   1.0 if result.verdict == DRAW else 0.0)
+    suite.add(mc4)
+
+    # Save
+    results_dir = Path(__file__).parent / "results"
+    json_path = str(results_dir / "chess.json")
+    suite.to_json(json_path)
+    print(f"\nThree-column results saved to {json_path}")
+    print("\n" + suite.to_markdown())
+
+
 if __name__ == "__main__":
     main()
+    run_three_column_suite()

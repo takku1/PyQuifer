@@ -542,6 +542,42 @@ class GlobalWorkspace(nn.Module):
         self.ignition.last_ignition.fill_(-1000)
 
 
+class DiversityTracker:
+    """
+    Anti-collapse mechanism for workspace competition.
+
+    Tracks per-organ win counts over a sliding window and boosts
+    salience for organs that haven't won recently.
+
+    Args:
+        pressure: Boost strength for underrepresented organs
+        window_size: Sliding window for tracking wins
+    """
+
+    def __init__(self, pressure: float = 0.1, window_size: int = 50):
+        self.pressure = pressure
+        self.window_size = window_size
+        self._win_history: List[str] = []
+
+    def record_win(self, organ_id: str):
+        """Record a win for the given organ."""
+        self._win_history.append(organ_id)
+        if len(self._win_history) > self.window_size:
+            self._win_history.pop(0)
+
+    def get_boost(self, organ_id: str) -> float:
+        """Get salience boost for organ. Higher = hasn't won recently."""
+        if not self._win_history:
+            return self.pressure
+        win_count = sum(1 for w in self._win_history if w == organ_id)
+        win_fraction = win_count / len(self._win_history)
+        # Boost inversely proportional to win rate
+        return self.pressure * max(0.0, 1.0 - win_fraction * 2)
+
+    def reset(self):
+        self._win_history.clear()
+
+
 class HierarchicalWorkspace(nn.Module):
     """
     Multi-level workspace hierarchy.

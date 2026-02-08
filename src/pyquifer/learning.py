@@ -653,6 +653,210 @@ class LearnableEligibilityTrace(nn.Module):
         self.trace.zero_()
 
 
+class OscillationGatedPlasticity(nn.Module):
+    """
+    Phase-gated learning rule: traces only accumulate during permissive theta phases.
+
+    dw_ij/dt = eta * G(phi_theta) * e_ij * M(t)
+    where G(phi) = (1 + cos(phi - phi_preferred)) / 2
+
+    Wires PhaseGate output to EligibilityTrace accumulation.
+    LTP at theta trough, LTD at theta peak — creates feedback loop:
+    oscillator state -> learning -> changed oscillator state.
+
+    References:
+    - Huerta & Lisman (1995). Theta-phase gating of LTP/LTD.
+    - Hasselmo et al. (2002). Theta rhythm and memory encoding.
+    """
+
+    def __init__(self, shape: Tuple[int, ...], preferred_phase: float = math.pi,
+                 decay_rate: float = 0.95, accumulation_rate: float = 0.1):
+        """
+        Args:
+            shape: Shape of the trace (e.g., weight matrix shape)
+            preferred_phase: Phase angle where plasticity is maximal (default: pi = trough)
+            decay_rate: Exponential decay of trace between updates
+            accumulation_rate: Base rate of trace accumulation
+        """
+        super().__init__()
+        self.preferred_phase = preferred_phase
+        self.decay_rate = decay_rate
+        self.accumulation_rate = accumulation_rate
+
+        self.register_buffer('trace', torch.zeros(shape))
+        self.register_buffer('gate_value', torch.tensor(0.0))
+
+    def forward(self, activity: torch.Tensor, theta_phase: torch.Tensor,
+                pre_activity: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Update trace gated by theta phase. Returns current trace.
+
+        Args:
+            activity: Post-synaptic activity (same shape as trace, or 1D for outer product)
+            theta_phase: Current theta oscillation phase (scalar)
+            pre_activity: Optional pre-synaptic activity for Hebbian-style traces
+
+        Returns:
+            Current trace tensor
+        """
+        # Compute phase gate: G(phi) = (1 + cos(phi - preferred)) / 2
+        phase_val = theta_phase.detach() if isinstance(theta_phase, torch.Tensor) else torch.tensor(theta_phase)
+        gate = (1.0 + torch.cos(phase_val - self.preferred_phase)) / 2.0
+
+        with torch.no_grad():
+            self.gate_value.copy_(gate)
+
+            # Decay existing trace
+            self.trace.mul_(self.decay_rate)
+
+            # Gate the accumulation rate
+            gated_rate = self.accumulation_rate * gate.item()
+
+            if pre_activity is not None:
+                if activity.dim() == 1 and pre_activity.dim() == 1:
+                    hebbian = torch.outer(activity, pre_activity)
+                else:
+                    hebbian = activity * pre_activity
+                self.trace.add_(gated_rate * hebbian)
+            else:
+                self.trace.add_(gated_rate * activity)
+
+        return self.trace.clone()
+
+    def apply_modulated_reward(self, reward: torch.Tensor,
+                               neuromodulation: Optional[torch.Tensor] = None,
+                               lr: float = 0.01) -> torch.Tensor:
+        """
+        Three-factor update: trace * reward * neuromodulation.
+
+        Args:
+            reward: Reward signal (scalar or broadcastable)
+            neuromodulation: Optional neuromodulatory signal (scalar or broadcastable)
+            lr: Learning rate
+
+        Returns:
+            Weight delta to apply
+        """
+        delta = lr * reward * self.trace
+        if neuromodulation is not None:
+            delta = delta * neuromodulation
+        return delta
+
+    def reset(self):
+        """Reset trace to zero."""
+        self.trace.zero_()
+        self.gate_value.zero_()
+
+
+class ThreeFactorRule(nn.Module):
+    """
+    Canonical three-factor learning: Pre * Post * Modulation.
+
+    dw_ij = eta * e_ij(t) * M_composite(t) * H(r_j, r_target)
+
+    Connects EligibilityTrace to NeuromodulatorDynamics output.
+    Homeostatic factor H stabilizes learning by preventing runaway firing.
+
+    References:
+    - Gerstner et al. (2018). Eligibility Traces and Plasticity on Behavioral Timescales.
+    - Frémaux & Gerstner (2016). Neuromodulated STDP and Theory of Three-Factor Learning.
+    """
+
+    def __init__(self, input_dim: int, output_dim: int,
+                 trace_decay: float = 0.95, homeostatic_target: float = 0.1,
+                 homeostatic_rate: float = 0.001):
+        """
+        Args:
+            input_dim: Pre-synaptic dimension
+            output_dim: Post-synaptic dimension
+            trace_decay: Decay rate for eligibility trace
+            homeostatic_target: Target firing rate for homeostatic regulation
+            homeostatic_rate: Rate of homeostatic adjustment
+        """
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.homeostatic_target = homeostatic_target
+        self.homeostatic_rate = homeostatic_rate
+
+        # Weights (updated locally, not by backprop)
+        self.weight = nn.Parameter(torch.randn(output_dim, input_dim) * 0.1)
+        self.bias = nn.Parameter(torch.zeros(output_dim))
+
+        # Eligibility trace
+        self.register_buffer('trace', torch.zeros(output_dim, input_dim))
+        self.trace_decay = trace_decay
+
+        # Running post-synaptic rate (EMA)
+        self.register_buffer('running_rate', torch.ones(output_dim) * homeostatic_target)
+
+    def forward(self, pre: torch.Tensor, post: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass + update trace with pre-post correlation.
+
+        Args:
+            pre: Pre-synaptic input (input_dim,) or (batch, input_dim)
+            post: Optional explicit post-synaptic activity. If None, computed from weights.
+
+        Returns:
+            Post-synaptic output (output_dim,) or (batch, output_dim)
+        """
+        was_1d = pre.dim() == 1
+        if was_1d:
+            pre = pre.unsqueeze(0)
+
+        if post is None:
+            post = torch.tanh(pre @ self.weight.T + self.bias)
+
+        # Update eligibility trace with pre-post correlation
+        with torch.no_grad():
+            self.trace.mul_(self.trace_decay)
+            # Hebbian: outer(post, pre) averaged over batch
+            self.trace.add_(
+                torch.einsum('bi,bj->ij', post, pre) / pre.shape[0]
+            )
+
+            # Update running rate (EMA of post-synaptic activity magnitude)
+            post_rate = post.abs().mean(dim=0)
+            self.running_rate.mul_(0.99).add_(0.01 * post_rate)
+
+        return post.squeeze(0) if was_1d else post
+
+    def modulated_update(self, modulation_signal: torch.Tensor,
+                         homeostatic_rate: Optional[torch.Tensor] = None):
+        """
+        Apply weight update: trace * modulation * homeostatic factor.
+
+        Args:
+            modulation_signal: Neuromodulatory signal (scalar or per-output)
+            homeostatic_rate: Optional override for homeostatic rate
+        """
+        h_rate = homeostatic_rate if homeostatic_rate is not None else self.homeostatic_rate
+        h_factor = self.homeostatic_factor
+
+        with torch.no_grad():
+            # Modulation can be scalar or per-output neuron
+            if modulation_signal.dim() == 0:
+                update = modulation_signal * self.trace * h_factor.unsqueeze(1)
+            else:
+                update = modulation_signal.unsqueeze(1) * self.trace * h_factor.unsqueeze(1)
+
+            self.weight.add_(update)
+
+    @property
+    def homeostatic_factor(self) -> torch.Tensor:
+        """H(r, r_target) = clip(1 + eta_h * (r_target - running_rate), 0.1, 10)"""
+        return torch.clamp(
+            1.0 + self.homeostatic_rate * (self.homeostatic_target - self.running_rate),
+            min=0.1, max=10.0,
+        )
+
+    def reset(self):
+        """Reset trace and running rate."""
+        self.trace.zero_()
+        self.running_rate.fill_(self.homeostatic_target)
+
+
 if __name__ == '__main__':
     print("--- Learning Rules Beyond Backprop Examples ---")
 

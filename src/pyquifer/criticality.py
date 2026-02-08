@@ -117,7 +117,8 @@ class AvalancheDetector(nn.Module):
             return torch.tensor([], device=dev), torch.tensor([], device=dev)
 
         sizes = valid.unique(sorted=True)
-        counts = torch.stack([(valid == s).sum() for s in sizes])
+        # Vectorized: compare all valid entries against all unique sizes at once
+        counts = (valid.unsqueeze(-1) == sizes).sum(0)
 
         return sizes, counts
 

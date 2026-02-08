@@ -60,7 +60,8 @@ class LearnableKuramotoBank(nn.Module):
                  initial_phase_range: tuple = (0.0, 2 * math.pi),
                  topology: Literal['global', 'small_world', 'scale_free', 'ring', 'learnable'] = 'global',
                  topology_params: Optional[dict] = None,
-                 integration_method: Literal['euler', 'rk4'] = 'euler'):
+                 integration_method: Literal['euler', 'rk4'] = 'euler',
+                 learnable_coupling_matrix: bool = False):
         """
         Args:
             num_oscillators: Number of oscillators in the bank.
@@ -79,6 +80,8 @@ class LearnableKuramotoBank(nn.Module):
                 - ring: {'k': neighbors_each_side}
                 - learnable: {'sparsity': target_sparsity}
             integration_method: 'euler' (default) or 'rk4' (4th-order Runge-Kutta)
+            learnable_coupling_matrix: If True, use per-connection learnable weights
+                instead of a single scalar coupling_strength. Required for EP training.
         """
         super().__init__()
         self.num_oscillators = num_oscillators
@@ -87,6 +90,7 @@ class LearnableKuramotoBank(nn.Module):
         self.integration_method = integration_method
         self.topology_params = topology_params or {}
         self._global_topology = False  # Will be set True for global topology
+        self.learnable_coupling_matrix = learnable_coupling_matrix
 
         # Learnable natural frequencies for each oscillator
         self.natural_frequencies = nn.Parameter(
@@ -116,6 +120,12 @@ class LearnableKuramotoBank(nn.Module):
 
         # Initialize adjacency matrix based on topology
         self._init_adjacency(topology, self.topology_params)
+
+        # Per-connection learnable coupling weights (for EP training)
+        if learnable_coupling_matrix:
+            self.coupling_matrix = nn.Parameter(
+                torch.ones(num_oscillators, num_oscillators) * 0.1
+            )
 
     def _init_adjacency(self, topology: str, params: dict):
         """Initialize the adjacency matrix based on the specified topology."""
@@ -279,18 +289,23 @@ class LearnableKuramotoBank(nn.Module):
                 # Calculate phase differences: theta_j - theta_i
                 phase_diffs = phases.unsqueeze(1) - phases.unsqueeze(0)  # (n, n)
 
+                # Apply per-connection coupling matrix if enabled
+                effective_adj = adj
+                if self.learnable_coupling_matrix:
+                    effective_adj = adj * self.coupling_matrix
+
                 if use_precision:
                     # Precision-weighted adjacency: effective_adj = adj * source_precision
-                    effective_adj = adj * self.precision.detach().unsqueeze(0)  # (n, n) * (1, n) = broadcast over rows
+                    effective_adj = effective_adj * self.precision.detach().unsqueeze(0)  # (n, n) * (1, n) = broadcast over rows
                     weighted_interaction = effective_adj * torch.sin(phase_diffs)
                     interaction_sum = torch.sum(weighted_interaction, dim=1)
                     # Normalize by sum of effective weights per row
                     weight_sums = effective_adj.sum(dim=1).clamp(min=1e-8)
                     normalized_interaction = interaction_sum / weight_sums
                 else:
-                    weighted_interaction = adj * torch.sin(phase_diffs)
+                    weighted_interaction = effective_adj * torch.sin(phase_diffs)
                     interaction_sum = torch.sum(weighted_interaction, dim=1)
-                    connection_counts = adj.sum(dim=1).clamp(min=1)
+                    connection_counts = effective_adj.abs().sum(dim=1).clamp(min=1)
                     normalized_interaction = interaction_sum / connection_counts
 
             # Kuramoto dynamics equation
@@ -317,16 +332,19 @@ class LearnableKuramotoBank(nn.Module):
                             ni = ints / (self.num_oscillators - 1)
                     else:
                         pd = ph.unsqueeze(1) - ph.unsqueeze(0)
+                        ea = adj
+                        if self.learnable_coupling_matrix:
+                            ea = ea * self.coupling_matrix
                         if use_precision:
-                            ea = adj * self.precision.detach().unsqueeze(0)
+                            ea = ea * self.precision.detach().unsqueeze(0)
                             wi = ea * torch.sin(pd)
                             is_ = torch.sum(wi, dim=1)
                             ws = ea.sum(dim=1).clamp(min=1e-8)
                             ni = is_ / ws
                         else:
-                            wi = adj * torch.sin(pd)
+                            wi = ea * torch.sin(pd)
                             is_ = torch.sum(wi, dim=1)
-                            cc = adj.sum(dim=1).clamp(min=1)
+                            cc = ea.abs().sum(dim=1).clamp(min=1)
                             ni = is_ / cc
                     rhs = self.natural_frequencies + self.coupling_strength * ni
                     if _ext is not None:
@@ -350,16 +368,22 @@ class LearnableKuramotoBank(nn.Module):
             # Update running variance via EMA
             alpha = 1.0 / self._precision_tau
             instant_var = phase_velocity.pow(2)
+            # Mean over batch dim if present (buffers are 1-D)
+            if instant_var.dim() > 1:
+                instant_var = instant_var.mean(0)
             self.phase_velocity_var.mul_(1 - alpha).add_(instant_var * alpha)
 
             # Precision = 1 / (variance + epsilon)
             self.precision.copy_(
                 (1.0 / (self.phase_velocity_var + self._precision_epsilon)).clamp(max=100.0)
             )
-            self.prev_phases.copy_(phases.detach())
+            # Squeeze batch dim for 1-D buffers
+            _phases_1d = phases.detach().mean(0) if phases.dim() > 1 else phases.detach()
+            self.prev_phases.copy_(_phases_1d)
 
-        # Update internal state
-        self.phases.data = phases.detach()
+        # Update internal state — keep 1-D buffer shape
+        _store = phases.detach().mean(0) if phases.dim() > 1 else phases.detach()
+        self.phases.data = _store
         return phases
 
     def compute_attractor_stability(
