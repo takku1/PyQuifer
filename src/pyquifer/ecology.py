@@ -423,7 +423,7 @@ class SynapticHomeostasis(nn.Module):
             self.is_sleeping.fill_(True)
 
         dreams = []
-        weight_norm_before = self.weights.data.norm().item()
+        weight_norm_before = self.weights.detach().norm().item()
 
         for step in range(duration):
             with torch.no_grad():
@@ -458,7 +458,7 @@ class SynapticHomeostasis(nn.Module):
             self.is_sleeping.fill_(False)
             self.sleep_progress.fill_(0.0)
 
-        weight_norm_after = self.weights.data.norm().item()
+        weight_norm_after = self.weights.detach().norm().item()
 
         return {
             'duration': duration,
@@ -474,7 +474,7 @@ class SynapticHomeostasis(nn.Module):
 
         High excitability = weights have grown, need renormalization.
         """
-        return self.weights.data.norm().item()
+        return self.weights.detach().norm().item()
 
 
 class Umwelt(nn.Module):

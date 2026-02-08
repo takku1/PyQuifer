@@ -115,6 +115,20 @@ class CycleConfig:
     use_sleep_consolidation: bool = False   # SRC Hebbian sleep update
     use_dendritic_credit: bool = False      # Two-compartment dendritic neurons
 
+    # Phase 10: Multi-workspace ensemble
+    use_workspace_ensemble: bool = False   # Enable parallel workspaces with cross-bleed
+    n_workspaces: int = 2                  # Number of parallel workspaces
+    ensemble_workspace_dim: int = 256      # Workspace dim for ensemble (uses workspace_dim if 0)
+    cross_bleed_strength: float = 0.3      # How much background workspaces bleed into active
+    standing_momentum: float = 0.9         # EMA momentum for standing broadcasts
+
+    # Phase 9b: Cross-module integration wiring
+    use_circadian: bool = False            # ChronobiologicalSystem → consolidation timing
+    use_personality_attractor: bool = False # PersonalityAttractor → metastability/personality
+    use_somatic: bool = False              # SomaticManifold → self-model/narrative
+    use_phase_dominance: bool = False      # Oscillator phases → causal flow dominance
+    use_motivation_priority: bool = False  # Motivation → memory consolidation priority
+
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
@@ -406,6 +420,44 @@ class CognitiveCycle(nn.Module):
                 pressure=c.gw_diversity_pressure,
             )
 
+        # === Phase 10: Multi-Workspace Ensemble ===
+        self._workspace_ensemble = None
+        if c.use_workspace_ensemble:
+            from pyquifer.global_workspace import WorkspaceEnsemble
+            ws_dim = c.ensemble_workspace_dim if c.ensemble_workspace_dim > 0 else c.workspace_dim
+            self._workspace_ensemble = WorkspaceEnsemble(
+                n_workspaces=c.n_workspaces,
+                content_dim=c.workspace_dim,
+                workspace_dim=ws_dim,
+                n_slots=8,
+                n_winners=c.gw_n_winners,
+                bleed_strength=c.cross_bleed_strength,
+                standing_momentum=c.standing_momentum,
+            )
+
+        # === Phase 9b: Cross-module wiring modules ===
+        self._circadian = None
+        self._personality = None
+        self._somatic = None
+
+        if c.use_circadian:
+            from pyquifer.ecology import ChronobiologicalSystem
+            self._circadian = ChronobiologicalSystem(dim=c.state_dim)
+
+        if c.use_personality_attractor:
+            from pyquifer.strange_attractor import PersonalityAttractor
+            self._personality = PersonalityAttractor(
+                dim=min(c.state_dim, 16),
+                num_attractors=c.num_populations,
+            )
+
+        if c.use_somatic:
+            from pyquifer.somatic import SomaticManifold
+            self._somatic = SomaticManifold(
+                num_oscillators=c.num_oscillators,
+                manifold_dim=min(c.internal_dim, 8),
+            )
+
         # === Projection layers (bridge mismatched dimensions) ===
         # Project oscillator phases to state_dim for various modules
         self.phase_to_state = nn.Linear(c.num_oscillators, c.state_dim, bias=False)
@@ -564,6 +616,24 @@ class CognitiveCycle(nn.Module):
         if self._mean_field is not None:
             _mf_result = self._mean_field(steps=1)
 
+        # ── Step 1d: Circadian rhythm (modulates sleep/plasticity) ──
+        circadian_info = {}
+        circadian_plasticity = 1.0
+        if self._circadian is not None:
+            circ_result = self._circadian.step()
+            circadian_plasticity = circ_result['plasticity'].item() if isinstance(circ_result['plasticity'], torch.Tensor) else circ_result['plasticity']
+            circadian_mode = circ_result.get('mode', 'wake')
+            # Circadian rhythm modulates effective sleep signal
+            if circadian_mode == 'sleep' and sleep_signal < 0.3:
+                sleep_signal = max(sleep_signal, 0.4)  # Gentle circadian sleep push
+            circadian_info = {
+                'circadian_phase': circ_result['circadian_phase'],
+                'circadian_plasticity': circadian_plasticity,
+                'circadian_mode': circadian_mode,
+                'circadian_temperature': circ_result['temperature'],
+                'circadian_hour': circ_result['hour'],
+            }
+
         # ── Step 2: Criticality check ──
         # Use oscillator phases as activity signal
         activity = torch.sin(phases)
@@ -673,6 +743,23 @@ class CognitiveCycle(nn.Module):
         level_activations = torch.stack(
             [err.norm() for err in hpc_result['errors']]
         ).to(device)
+
+        # Phase → Causal Flow wiring: modulate level activations with oscillator
+        # phase coherence per frequency band (subgroups of oscillators)
+        if c.use_phase_dominance:
+            n_osc = c.num_oscillators
+            n_levels = len(c.hierarchy_dims)
+            band_size = max(1, n_osc // n_levels)
+            for lvl in range(n_levels):
+                start = lvl * band_size
+                end = min(start + band_size, n_osc)
+                if end > start:
+                    band_phases = phases[start:end]
+                    # Phase coherence in this band (order parameter)
+                    band_r = torch.abs(torch.exp(1j * band_phases.to(torch.complex64)).mean())
+                    # Modulate: high band coherence amplifies that level's activation
+                    level_activations[lvl] = level_activations[lvl] * (0.5 + band_r)
+
         dom_result = self.dominance(level_activations, compute_every=10)
         dominance_ratio = dom_result['dominance_ratio'].item()
         processing_mode = dom_result['mode']
@@ -682,10 +769,77 @@ class CognitiveCycle(nn.Module):
         dominant_state = meta_result['dominant'].item()
         coalition_entropy = meta_result['coalition_entropy'].item()
 
-        # ── Step 8a: Global Workspace competition (if enabled) ──
+        # ── Step 8a: Personality attractor (if enabled) ──
+        personality_info = {}
+        if self._personality is not None:
+            # Drive attractor with oscillator phase state (projected to attractor dim)
+            phase_state = torch.sin(phases[:min(len(phases), self._personality.dim)])
+            pers_state = self._personality.step(external_input=phase_state)
+            personality_info = {
+                'personality_state': pers_state.detach(),
+                'lyapunov_exponent': self._personality.get_lyapunov_exponent(),
+            }
+
+        # ── Step 8b: Global Workspace competition (if enabled) ──
         gw_info = {}
         if self.config.use_global_workspace and self._organs:
             gw_info = self._run_workspace_competition(sensory_input[0], phases)
+
+        # ── Step 8c: Multi-Workspace Ensemble (if enabled) ──
+        ensemble_info = {}
+        if self._workspace_ensemble is not None and self.config.use_global_workspace:
+            n_ws = self.config.n_workspaces
+            ws_dim = self.config.workspace_dim
+            # Build per-workspace contents from organ proposals + standing latents
+            # Active workspace (idx 0) gets fresh proposals, background gets standings
+            contents_per_ws = []
+            contexts_per_ws = []
+            for wi in range(n_ws):
+                if wi == self._workspace_ensemble.active_idx.item() and gw_info:
+                    # Active workspace: use the same proposals from GW competition
+                    # Repackage gw_info broadcast as content
+                    bcast = gw_info.get('gw_broadcast', torch.zeros(ws_dim, device=device))
+                    content = bcast.unsqueeze(0).unsqueeze(0).expand(1, 1, -1)
+                    # Use as its own context too
+                    ctx = content.clone()
+                else:
+                    # Background workspace: use organ standing latents
+                    standings = []
+                    for organ, adapter in self._organs:
+                        sl = organ.standing_latent
+                        if adapter is not None:
+                            sl = adapter.encode(sl.unsqueeze(0)).squeeze(0)
+                        else:
+                            if sl.shape[-1] < ws_dim:
+                                sl = torch.nn.functional.pad(sl, (0, ws_dim - sl.shape[-1]))
+                            elif sl.shape[-1] > ws_dim:
+                                sl = sl[:ws_dim]
+                        standings.append(sl)
+                    if standings:
+                        content = torch.stack(standings).unsqueeze(0)  # [1, n_organs, ws_dim]
+                    else:
+                        content = torch.zeros(1, 1, ws_dim, device=device)
+                    ctx = content.clone()
+                contents_per_ws.append(content)
+                contexts_per_ws.append(ctx)
+
+            # Build phase lists (split oscillator phases across workspaces)
+            n_osc = c.num_oscillators
+            osc_per_ws = max(1, n_osc // n_ws)
+            phases_per_ws = []
+            for wi in range(n_ws):
+                start = wi * osc_per_ws
+                end = min(start + osc_per_ws, n_osc)
+                phases_per_ws.append(phases[start:end])
+
+            ens_result = self._workspace_ensemble(
+                contents_per_ws, contexts_per_ws, phases_per_ws
+            )
+            ensemble_info = {
+                'ensemble_bleed_matrix': ens_result['bleed_matrix'].detach(),
+                'ensemble_active_idx': ens_result['active_idx'],
+                'ensemble_n_workspaces': n_ws,
+            }
 
         # ── Step 8b: Optional Wilson-Cowan neural mass ──
         neural_mass_info = {}
@@ -706,6 +860,16 @@ class CognitiveCycle(nn.Module):
         global_coherence_signal = self.state_to_group(
             self.phase_to_state(torch.sin(phases).unsqueeze(0)).squeeze(0)
         )
+
+        # GW → Arena wiring: blend workspace broadcast into coherence signal
+        if gw_info and 'gw_broadcast' in gw_info:
+            # Project workspace broadcast to group_dim and add to coherence
+            gw_proj = gw_info['gw_broadcast'][:c.group_dim]
+            if gw_proj.shape[0] < c.group_dim:
+                gw_proj = torch.nn.functional.pad(gw_proj, (0, c.group_dim - gw_proj.shape[0]))
+            # Weight by ignition strength (0.2 blend factor)
+            global_coherence_signal = global_coherence_signal + 0.2 * gw_proj
+
         arena_result = self.arena(group_input, global_coherence=global_coherence_signal)
         self.symbiogenesis(arena_result['group_outputs'])
 
@@ -719,7 +883,30 @@ class CognitiveCycle(nn.Module):
         # ── Step 11: Self-model ──
         sensory_for_blanket = self.state_to_sensory(sensory_input[0])
         blanket = self.markov_blanket(sensory_for_blanket)
-        self_result = self.self_model(blanket['internal_state'])
+
+        # Somatic → Self-Model wiring: enrich internal state with body signals
+        somatic_info = {}
+        internal_state = blanket['internal_state']
+        if self._somatic is not None:
+            som_result = self._somatic.forward()
+            som_state = som_result['state']  # SomaticState dataclass
+            stress_val = som_state.total_stress()
+            coupling_mod = som_result.get('coupling_modulation', None)
+            somatic_info = {
+                'somatic_stress': stress_val,
+                'somatic_pain': som_state.pain,
+                'somatic_fatigue': som_state.fatigue,
+                'should_repair': som_result.get('should_repair', False),
+            }
+            # Modulate internal state: high stress → dampen self-model updates
+            stress_gate = max(0.3, 1.0 - stress_val * 0.5)  # [0.3, 1.0]
+            internal_state = internal_state * stress_gate
+            # Somatic coupling modulation → oscillator coupling
+            if coupling_mod is not None and coupling_mod.shape[0] == c.num_oscillators:
+                with torch.no_grad():
+                    self.oscillators.coupling_strength.mul_(0.9).add_(0.1 * coupling_mod.mean())
+
+        self_result = self.self_model(internal_state)
         narr_result = self.narrative(self_result['self_summary'])
 
         # ── Step 11b: Three-factor learning ──
@@ -759,9 +946,22 @@ class CognitiveCycle(nn.Module):
         if sleep_signal > 0.3:
             replay = self.sharp_wave_ripple(self.episodic_buffer, sleep_signal=sleep_signal)
             if replay['replayed_states'].shape[0] > 0:
+                replay_rewards = replay['replayed_rewards']
+
+                # Motivation → Memory Priority wiring: high-motivation memories
+                # consolidate with amplified reward signal
+                if c.use_motivation_priority and combined_motivation > 0:
+                    # Scale rewards: motivation boosts consolidation priority
+                    priority_scale = 1.0 + combined_motivation * 0.5  # [1.0, ~2.0]
+                    replay_rewards = replay_rewards * priority_scale
+
+                # Circadian → Consolidation wiring: plasticity modulates consolidation
+                if self._circadian is not None:
+                    replay_rewards = replay_rewards * circadian_plasticity
+
                 cons = self.consolidation(
                     replay['replayed_states'],
-                    replay['replayed_rewards'],
+                    replay_rewards,
                 )
                 consolidation_info = {
                     'consolidated': cons['consolidated'].item() if isinstance(cons['consolidated'], torch.Tensor) else cons['consolidated'],
@@ -820,8 +1020,17 @@ class CognitiveCycle(nn.Module):
         # ── Compute LLM modulation parameters ──
         # This is the critical output — what actually modulates the language model
         temperature = self._compute_temperature(coherence, criticality_distance)
+
+        # Circadian → Temperature wiring: circadian rhythm modulates temperature
+        if circadian_info:
+            circ_temp = circadian_info.get('circadian_temperature', 1.0)
+            # Blend: circadian warmth during rest, cooler during active
+            temperature = temperature * (0.8 + 0.2 * circ_temp)
+            temperature = max(0.1, min(2.0, temperature))
+
         personality_blend = self._compute_personality_blend(
-            dominant_state, narr_result['identity_strength'].item()
+            dominant_state, narr_result['identity_strength'].item(),
+            attractor_state=personality_info.get('personality_state', None),
         )
         attention_bias = attention_map.detach()
 
@@ -902,6 +1111,10 @@ class CognitiveCycle(nn.Module):
                 **src_info,
                 **ep_info,
                 **gw_info,
+                **ensemble_info,
+                **circadian_info,
+                **personality_info,
+                **somatic_info,
                 'theta_gate_value': theta_gate_value,
             },
         }
@@ -924,18 +1137,32 @@ class CognitiveCycle(nn.Module):
         return temp
 
     def _compute_personality_blend(self, dominant_state: int,
-                                    identity_strength: float) -> Dict[str, float]:
+                                    identity_strength: float,
+                                    attractor_state: Optional[torch.Tensor] = None,
+                                    ) -> Dict[str, float]:
         """
         Map metastable dominant state to personality expression weights.
 
         Each population in the WinnerlessCompetition maps to a personality facet.
         Identity strength determines how much personality constrains the blend.
+        When a PersonalityAttractor is active, its state biases the facet weights.
         """
         num_pop = self.config.num_populations
 
         # Base weights from dominant state (one-hot with softening)
         weights = [0.1] * num_pop
         weights[dominant_state % num_pop] = 1.0
+
+        # Personality → Metastability wiring: attractor state biases facet weights
+        if attractor_state is not None:
+            # Map attractor dimensions to population weights via chunked mean
+            chunk = max(1, attractor_state.shape[0] // num_pop)
+            for i in range(num_pop):
+                start = i * chunk
+                end = min(start + chunk, attractor_state.shape[0])
+                if end > start:
+                    bias = attractor_state[start:end].mean().item()
+                    weights[i] += abs(bias) * 0.3  # Gentle bias, not override
 
         # Normalize
         total = sum(weights)
@@ -1001,6 +1228,12 @@ class CognitiveCycle(nn.Module):
         if self._dendritic_stack is not None:
             self._dendritic_stack.reset()
         # EP trainer has no state to reset (bank phases are reset with oscillators)
+
+        # Phase 10 workspace ensemble
+        if self._workspace_ensemble is not None:
+            self._workspace_ensemble.reset()
+
+        # Phase 9b cross-module wiring modules (no reset methods — state is organic)
 
         # Phase 7 optional modules
         if self._no_progress is not None:

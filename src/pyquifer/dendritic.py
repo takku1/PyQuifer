@@ -130,7 +130,8 @@ class DendriticNeuron(nn.Module):
                 centered_input,
             )
 
-            self.W_basal.data.add_(delta_w)
+            with torch.no_grad():
+                self.W_basal.add_(delta_w)
 
         return delta_w
 

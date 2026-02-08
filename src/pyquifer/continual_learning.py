@@ -125,7 +125,7 @@ class ElasticWeightConsolidation(nn.Module):
 
                     for name, param in self.model.named_parameters():
                         if param.grad is not None:
-                            fisher[name] += param.grad.data.pow(2)
+                            fisher[name] += param.grad.detach().pow(2)
 
                     samples_seen += 1
                     if samples_seen >= num_samples:
@@ -135,7 +135,7 @@ class ElasticWeightConsolidation(nn.Module):
                 output.sum().backward()
                 for name, param in self.model.named_parameters():
                     if param.grad is not None:
-                        fisher[name] += param.grad.data.pow(2)
+                        fisher[name] += param.grad.detach().pow(2)
                 samples_seen += len(x)
 
         # Normalize
@@ -282,7 +282,7 @@ class SynapticIntelligence(nn.Module):
                 # Note: gradient points in direction of increasing loss
                 # Weight change will be opposite (decreasing loss)
                 self.small_omega[name] += (
-                    -param.grad.data * (param.data - self.W_old[name])
+                    -param.grad.detach() * (param.detach() - self.W_old[name])
                 )
 
     def consolidate(self, task_name: str = ""):
@@ -292,7 +292,7 @@ class SynapticIntelligence(nn.Module):
         for name, param in self.model.named_parameters():
             if name in self.small_omega:
                 # Normalize by total weight change
-                delta = param.data - self.W_old[name]
+                delta = param.detach() - self.W_old[name]
 
                 # Update cumulative importance
                 self.omega[name] += (
@@ -301,7 +301,7 @@ class SynapticIntelligence(nn.Module):
                 )
 
                 # Reset for next task
-                self.W_old[name] = param.data.clone()
+                self.W_old[name] = param.detach().clone()
                 self.small_omega[name].zero_()
 
     def penalty(self) -> torch.Tensor:
@@ -517,7 +517,7 @@ class MESU(nn.Module):
         """
         for name, param in self.model.named_parameters():
             if param.grad is not None and name in self.meta:
-                grad = param.grad.data
+                grad = param.grad.detach()
 
                 # Update gradient statistics
                 self.grad_ema[name] = (
@@ -553,7 +553,7 @@ class MESU(nn.Module):
                     if p is param and name in lr_mods:
                         # Store original gradient
                         if param.grad is not None:
-                            param.grad.data *= lr_mods[name]
+                            param.grad.mul_(lr_mods[name])
                         break
 
 

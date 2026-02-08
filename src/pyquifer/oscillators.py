@@ -382,8 +382,9 @@ class LearnableKuramotoBank(nn.Module):
             self.prev_phases.copy_(_phases_1d)
 
         # Update internal state — keep 1-D buffer shape
-        _store = phases.detach().mean(0) if phases.dim() > 1 else phases.detach()
-        self.phases.data = _store
+        with torch.no_grad():
+            _store = phases.detach().mean(0) if phases.dim() > 1 else phases.detach()
+            self.phases.copy_(_store)
         return phases
 
     def compute_attractor_stability(

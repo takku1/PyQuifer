@@ -248,7 +248,8 @@ class TemporalMultiplexer(nn.Module):
         ])
         # Set each gate to prefer its assigned phase slot
         for i, gate in enumerate(self.gates):
-            gate.phase_preferences.data.fill_(self.stream_phases[i].item())
+            with torch.no_grad():
+                gate.phase_preferences.fill_(self.stream_phases[i].item())
 
     def forward(self,
                 streams: List[torch.Tensor],

@@ -259,7 +259,7 @@ class SocialCoupling(nn.Module):
 
         # Self-coupling set to zero (no self-influence)
         with torch.no_grad():
-            self.coupling_matrix.data.fill_diagonal_(0)
+            self.coupling_matrix.fill_diagonal_(0)
 
     def step(self, dt: float = 0.01,
              external_inputs: Optional[torch.Tensor] = None) -> Dict[str, Any]:
@@ -798,7 +798,8 @@ class TheoryOfMind(nn.Module):
 
         # Update other-model via phase locking
         phase_diff = observed_phase[:min(len(observed_phase), self.dim)] - self.other_phases[model_idx, :len(observed_phase)]
-        self.other_phases.data[model_idx, :len(observed_phase)] += 0.3 * torch.sin(phase_diff)
+        with torch.no_grad():
+            self.other_phases[model_idx, :len(observed_phase)] += 0.3 * torch.sin(phase_diff)
 
         return {
             'model_idx': model_idx,

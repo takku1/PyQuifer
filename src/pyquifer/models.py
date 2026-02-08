@@ -106,7 +106,8 @@ class GenerativeWorldModel(nn.Module):
         # --- Top-Down: The "Self" Vector Predicting ---
         # 3. "Mind's Eye" Actualization
         # For this model, let's explicitly set the actualization's target vector to our archetype
-        self.mind_eye_actualization.target_vector.data = self.archetype_vector.data
+        with torch.no_grad():
+            self.mind_eye_actualization.target_vector.copy_(self.archetype_vector)
 
         # Run the actualization process
         actualized_state = self.mind_eye_actualization(

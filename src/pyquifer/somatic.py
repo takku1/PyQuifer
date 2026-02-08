@@ -83,7 +83,7 @@ class HardwareSensor:
                     metrics["vram_stress"] = (used_ratio - 0.8) * 5  # 0-0.5
                 else:
                     metrics["vram_stress"] = max(0, used_ratio - 0.5) * 0.5
-        except Exception:
+        except (RuntimeError, ImportError):
             metrics["vram_stress"] = 0.0
 
         # CPU stress (simplified - would use psutil in production)
@@ -96,7 +96,7 @@ class HardwareSensor:
                 metrics["cpu_stress"] = min(1.0, load / cpu_count)
             else:
                 metrics["cpu_stress"] = 0.2  # Default low stress on Windows
-        except Exception:
+        except (OSError, AttributeError):
             metrics["cpu_stress"] = 0.0
 
         # Latency stress (based on recent response times)

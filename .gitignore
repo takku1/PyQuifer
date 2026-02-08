@@ -53,21 +53,30 @@ Thumbs.db
 .env.local
 
 # Third-party benchmark repos (cloned for comparison, not ours)
-tests/benchmarks/EGG/
-tests/benchmarks/Gymnasium/
-tests/benchmarks/KuraNet/
-tests/benchmarks/MD-Bench/
-tests/benchmarks/PredBench/
-tests/benchmarks/SciMLBenchmarks.jl/
-tests/benchmarks/Torch2PC/
+tests/benchmarks/arXiv-*/
 tests/benchmarks/bifurcation/
+tests/benchmarks/chessqa-benchmark/
+tests/benchmarks/EGG/
 tests/benchmarks/emergent_communication_at_scale/
+tests/benchmarks/Gymnasium/
 tests/benchmarks/hanabi-learning-environment/
+tests/benchmarks/KuraNet/
 tests/benchmarks/lava/
+tests/benchmarks/MD-Bench/
 tests/benchmarks/meltingpot/
 tests/benchmarks/neurobench/
 tests/benchmarks/neurodiscoverybench/
 tests/benchmarks/nlb_tools/
 tests/benchmarks/open_spiel/
+tests/benchmarks/osbenchmarks/
+tests/benchmarks/Plaskett_puzzle/
+tests/benchmarks/PredBench/
+tests/benchmarks/SciMLBenchmarks.jl/
+tests/benchmarks/searchless_chess/
+tests/benchmarks/Torch2PC/
 tests/benchmarks/torchdiffeq/
 tests/benchmarks/torchdyn/
+
+# Benchmark runtime artifacts
+tests/benchmarks/data/
+tests/benchmarks/results/

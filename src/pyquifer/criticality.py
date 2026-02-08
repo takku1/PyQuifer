@@ -502,8 +502,9 @@ class CriticalityController(nn.Module):
         """Reset all monitors and adjustments."""
         self.avalanche_detector.reset()
         self.branching_monitor.reset()
-        self.coupling_adjustment.data.fill_(1.0)
-        self.noise_adjustment.data.fill_(1.0)
+        with torch.no_grad():
+            self.coupling_adjustment.fill_(1.0)
+            self.noise_adjustment.fill_(1.0)
         self.integral_error.zero_()
         self.sigma_history.zero_()
         self.sigma_ptr.zero_()
@@ -594,8 +595,9 @@ class HomeostaticRegulator(nn.Module):
     def reset(self):
         """Reset homeostatic state."""
         self.running_activity.fill_(self.target_activity)
-        self.scaling.data.fill_(1.0)
-        self.threshold_offset.data.fill_(0.0)
+        with torch.no_grad():
+            self.scaling.fill_(1.0)
+            self.threshold_offset.fill_(0.0)
 
 
 class KoopmanBifurcationDetector(nn.Module):

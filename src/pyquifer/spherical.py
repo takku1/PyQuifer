@@ -88,14 +88,42 @@ def exponential_map(x: torch.Tensor, v: torch.Tensor, n: int) -> torch.Tensor:
     return reshape_from_groups(new_x)
 
 
+def _params_to_skew_symmetric(params: torch.Tensor, n: int) -> torch.Tensor:
+    """Convert flat parameter vector to n x n skew-symmetric matrix.
+
+    For oscillators on S^(n-1), the natural frequency is an element of so(n),
+    the Lie algebra of skew-symmetric matrices. This has n*(n-1)/2 free
+    parameters (the upper triangle).
+
+    Args:
+        params: [..., n*(n-1)//2] flat upper-triangle entries
+        n: Matrix dimension
+
+    Returns:
+        [..., n, n] skew-symmetric matrix (A = -A^T)
+    """
+    batch_shape = params.shape[:-1]
+    mat = torch.zeros(*batch_shape, n, n, device=params.device, dtype=params.dtype)
+    idx = torch.triu_indices(n, n, offset=1)
+    mat[..., idx[0], idx[1]] = params
+    return mat - mat.transpose(-2, -1)
+
+
 class LearnableOmega(nn.Module):
     """
-    Learnable natural frequencies for oscillators.
+    Learnable natural frequencies for oscillators on S^(n-1).
 
-    Each channel (or globally) has its own natural frequency
-    that determines intrinsic rotation speed.
+    Each oscillator's natural frequency is a skew-symmetric matrix in so(n),
+    the Lie algebra of the rotation group SO(n). The velocity at point x
+    on the sphere is v = Omega @ x where Omega is skew-symmetric.
 
-    Extracted from akorn's OmegaLayer.
+    Dimension-specific behavior:
+    - n=2 (S^1, circle): 1 free parameter, recovers standard (-omega*y, omega*x)
+    - n=3 (S^2, sphere): 3 free parameters (3D rotation generators)
+    - n=4 (S^3, hypersphere): 6 free parameters (quaternionic rotations)
+    - General S^(n-1): n*(n-1)/2 free parameters
+
+    Extracted from akorn's OmegaLayer, generalized to arbitrary dimension.
     """
 
     def __init__(self,
@@ -117,33 +145,47 @@ class LearnableOmega(nn.Module):
         self.n = components_per_oscillator
         self.global_omega = global_omega
 
-        if components_per_oscillator != 2:
-            raise NotImplementedError("Currently only n=2 (circle) supported")
+        # Number of free parameters in so(n)
+        n_params = self.n * (self.n - 1) // 2
 
-        # Initialize as 2D vector whose norm is the frequency
-        scale = init_omega * (1 / math.sqrt(2))
+        # Initialize so each skew-symmetric matrix has Frobenius norm ~ init_omega * sqrt(2)
+        # For n=2 this gives a single scalar whose abs is init_omega (backward compat)
+        scale = init_omega / max(math.sqrt(n_params), 1.0)
 
         if global_omega:
             self.omega_param = nn.Parameter(
-                scale * torch.ones(2),
+                scale * torch.ones(n_params),
                 requires_grad=learnable
             )
         else:
             self.omega_param = nn.Parameter(
-                scale * torch.ones(num_oscillators, 2),
+                scale * torch.ones(num_oscillators, n_params),
                 requires_grad=learnable
             )
 
     def get_frequencies(self) -> torch.Tensor:
-        """Get frequency magnitudes."""
+        """Get frequency magnitudes (Frobenius norm / sqrt(2) of each Omega)."""
+        if self.n == 2:
+            # Fast path: single parameter per oscillator, norm = |param|
+            if self.global_omega:
+                return self.omega_param.abs().repeat(self.num_oscillators)
+            else:
+                return self.omega_param.abs().squeeze(-1)
+
+        # General case: build skew-symmetric, compute Frobenius norm / sqrt(2)
         if self.global_omega:
-            return torch.linalg.norm(self.omega_param).repeat(self.num_oscillators)
+            omega_mat = _params_to_skew_symmetric(self.omega_param, self.n)
+            freq = torch.linalg.norm(omega_mat) / math.sqrt(2)
+            return freq.repeat(self.num_oscillators)
         else:
-            return torch.linalg.norm(self.omega_param, dim=1)
+            omega_mat = _params_to_skew_symmetric(self.omega_param, self.n)
+            # Frobenius norm per oscillator: sqrt(sum of squares) over last two dims
+            freq = torch.linalg.norm(omega_mat.flatten(-2), dim=-1) / math.sqrt(2)
+            return freq
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply natural frequency rotation.
+        Apply natural frequency rotation: v = Omega @ x.
 
         Args:
             x: Oscillator states [B, C, ...]
@@ -152,20 +194,50 @@ class LearnableOmega(nn.Module):
             Rotation velocity in tangent space
         """
         _x = reshape_to_groups(x, self.n)
+        # _x shape: [B, num_osc, n, ...] for spatial, [B, num_osc, n] for flat
 
+        if self.n == 2:
+            # Fast path for n=2: Omega = [[0, -w], [w, 0]], so Omega@x = (-w*x1, w*x0)
+            if self.global_omega:
+                omega = self.omega_param[0].expand(_x.shape[1])
+            else:
+                omega = self.omega_param[:, 0]  # [num_osc]
+
+            omega = omega[None]  # [1, num_osc]
+            for _ in range(_x.ndim - 3):
+                omega = omega.unsqueeze(-1)
+
+            omega_x = torch.stack([-omega * _x[:, :, 1], omega * _x[:, :, 0]], dim=2)
+            return reshape_from_groups(omega_x)
+
+        # General case: build skew-symmetric matrix and do matrix-vector product
         if self.global_omega:
-            omega = torch.linalg.norm(self.omega_param).repeat(_x.shape[1])
+            # Single omega for all oscillators: [n, n]
+            omega_mat = _params_to_skew_symmetric(self.omega_param, self.n)
+            if _x.ndim == 3:
+                # [B, num_osc, n] — contract last dim
+                omega_x = torch.einsum('ij,boj->boi', omega_mat, _x)
+            else:
+                # Spatial: [B, O, n, H, W...] — flatten spatial, contract n, restore
+                spatial_shape = _x.shape[3:]
+                flat = _x.reshape(_x.shape[0], _x.shape[1], self.n, -1)  # [B, O, n, S]
+                result = torch.einsum('ij,bosj->bosi',
+                                      omega_mat,
+                                      flat.permute(0, 1, 3, 2))  # [B, O, S, n]
+                omega_x = result.permute(0, 1, 3, 2).reshape_as(_x)
         else:
-            omega = torch.linalg.norm(self.omega_param, dim=1)
-
-        # Expand omega for broadcasting
-        omega = omega[None]  # [1, num_osc]
-        for _ in range(_x.ndim - 3):
-            omega = omega.unsqueeze(-1)
-
-        # Counter-clockwise rotation in 2D: (x,y) -> (-y, x) scaled by omega
-        # This gives velocity perpendicular to position
-        omega_x = torch.stack([-omega * _x[:, :, 1], omega * _x[:, :, 0]], dim=2)
+            # Per-oscillator: [num_osc, n_params] -> [num_osc, n, n]
+            omega_mat = _params_to_skew_symmetric(self.omega_param, self.n)
+            if _x.ndim == 3:
+                # [B, num_osc, n] — standard case
+                omega_x = torch.einsum('oij,boj->boi', omega_mat, _x)
+            else:
+                # Spatial: [B, O, n, H, W...] — flatten spatial, contract n, restore
+                spatial_shape = _x.shape[3:]
+                flat = _x.reshape(_x.shape[0], _x.shape[1], self.n, -1)  # [B, O, n, S]
+                flat_t = flat.permute(0, 1, 3, 2)  # [B, O, S, n]
+                result_t = torch.einsum('oij,bosj->bosi', omega_mat, flat_t)  # [B, O, S, n]
+                omega_x = result_t.permute(0, 1, 3, 2).reshape_as(_x)
 
         return reshape_from_groups(omega_x)
 
@@ -392,8 +464,11 @@ class SphericalKuramotoLayer(nn.Module):
         # Mean oscillator state
         mean_state = x_grouped.mean(dim=1, keepdim=True)
 
-        # Order parameter is magnitude of mean
-        r = torch.linalg.norm(mean_state, dim=2).squeeze()
+        # Order parameter is magnitude of mean — [B] or scalar
+        r = torch.linalg.norm(mean_state, dim=2).squeeze(-1).squeeze(-1)
+        # Ensure at least 1-dim for stacking in SphericalKuramotoBank
+        if r.ndim == 0:
+            r = r.unsqueeze(0)
 
         return r
 
@@ -449,9 +524,10 @@ class SphericalKuramotoBank(nn.Module):
 
     def _normalize_states(self):
         """Ensure states are on sphere."""
+        n = self.bands[0].n
         for i in range(self.num_bands):
             self.states[0, i] = normalize_oscillators(
-                self.states[0, i:i+1], 2
+                self.states[0, i:i+1], n
             ).squeeze(0)
 
     def step(self, external_input: Optional[torch.Tensor] = None,

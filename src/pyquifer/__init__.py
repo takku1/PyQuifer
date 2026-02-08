@@ -329,6 +329,10 @@ __all__ = [
     "MotivationOrgan",
     "SelectionOrgan",
     "DiversityTracker",
+    # Phase 10: Multi-workspace ensemble + cross-bleed
+    "StandingBroadcast",
+    "CrossBleedGate",
+    "WorkspaceEnsemble",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -700,6 +704,11 @@ _LAZY_IMPORTS = {
     "MotivationOrgan": (".organ", "MotivationOrgan"),
     "SelectionOrgan": (".organ", "SelectionOrgan"),
     "DiversityTracker": (".global_workspace", "DiversityTracker"),
+
+    # Phase 10: Multi-workspace ensemble + cross-bleed
+    "StandingBroadcast": (".global_workspace", "StandingBroadcast"),
+    "CrossBleedGate": (".global_workspace", "CrossBleedGate"),
+    "WorkspaceEnsemble": (".global_workspace", "WorkspaceEnsemble"),
 }
 
 # Cache for loaded attributes

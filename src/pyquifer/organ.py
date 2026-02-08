@@ -52,14 +52,20 @@ class Organ(nn.Module, ABC):
     """
 
     def __init__(self, organ_id: str, latent_dim: int,
-                 frequency: float = 1.0):
+                 frequency: float = 1.0,
+                 standing_momentum: float = 0.9):
         super().__init__()
         self.organ_id = organ_id
         self.latent_dim = latent_dim
+        self.standing_momentum = standing_momentum
 
         # Local oscillator state (not learned — evolves by dynamics)
         self.register_buffer('phase', torch.tensor(0.0))
         self.register_buffer('frequency', torch.tensor(frequency))
+
+        # Standing latent: EMA of recent broadcasts received
+        # Always present even when organ isn't actively competing
+        self.register_buffer('standing_latent', torch.zeros(latent_dim))
 
     def step_oscillator(self, dt: float = 0.01,
                         global_phase: Optional[torch.Tensor] = None,
@@ -71,6 +77,27 @@ class Organ(nn.Module, ABC):
                 # Kuramoto coupling to global phase
                 d_phase = d_phase + coupling * torch.sin(global_phase - self.phase)
             self.phase.add_(d_phase).remainder_(2 * math.pi)
+
+    def update_standing(self, new_content: torch.Tensor):
+        """Update standing latent representation via EMA.
+
+        Called by accept() so the organ's representation is always present
+        even when it's not actively competing this tick.
+        """
+        with torch.no_grad():
+            content = new_content.detach()
+            if content.dim() > 1:
+                content = content.squeeze(0)
+            # Trim/pad to latent_dim
+            if content.shape[-1] > self.latent_dim:
+                content = content[:self.latent_dim]
+            elif content.shape[-1] < self.latent_dim:
+                padded = torch.zeros(self.latent_dim, device=content.device)
+                padded[:content.shape[-1]] = content
+                content = padded
+            self.standing_latent.mul_(self.standing_momentum).add_(
+                content * (1 - self.standing_momentum)
+            )
 
     @abstractmethod
     def observe(self, sensory_input: torch.Tensor,
@@ -233,6 +260,7 @@ class HPCOrgan(Organ):
         )
 
     def accept(self, global_broadcast: torch.Tensor) -> None:
+        self.update_standing(global_broadcast)
         # Use broadcast as top-down prior (update top-level beliefs)
         if self._last_result is not None:
             top_dim = self.hpc.levels[-1].belief_dim
@@ -288,7 +316,7 @@ class MotivationOrgan(Organ):
         )
 
     def accept(self, global_broadcast: torch.Tensor) -> None:
-        pass  # Motivation doesn't learn from broadcast directly
+        self.update_standing(global_broadcast)
 
 
 class SelectionOrgan(Organ):
@@ -339,4 +367,4 @@ class SelectionOrgan(Organ):
         )
 
     def accept(self, global_broadcast: torch.Tensor) -> None:
-        pass  # Arena learns through its own competition dynamics
+        self.update_standing(global_broadcast)

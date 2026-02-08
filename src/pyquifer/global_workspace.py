@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 from dataclasses import dataclass
 from enum import Enum
 
@@ -661,6 +661,277 @@ class HierarchicalWorkspace(nn.Module):
                 ], dim=1)
 
         return results
+
+
+class StandingBroadcast(nn.Module):
+    """
+    EMA buffer that persists a workspace's recent broadcast content.
+
+    Even when a workspace doesn't ignite this tick, its standing broadcast
+    provides background context from previous successful competitions.
+
+    Args:
+        dim: Broadcast content dimension
+        momentum: How fast old broadcasts decay (higher = more persistent)
+    """
+
+    def __init__(self, dim: int, momentum: float = 0.9):
+        super().__init__()
+        self.momentum = momentum
+        self.register_buffer('content', torch.zeros(dim))
+
+    def update(self, new_broadcast: torch.Tensor) -> None:
+        """EMA update with new broadcast content."""
+        with torch.no_grad():
+            broadcast = new_broadcast.detach()
+            if broadcast.dim() > 1:
+                broadcast = broadcast.squeeze(0)
+            self.content.mul_(self.momentum).add_(
+                broadcast * (1 - self.momentum)
+            )
+
+    def get(self) -> torch.Tensor:
+        """Get current standing broadcast content."""
+        return self.content
+
+
+class CrossBleedGate(nn.Module):
+    """
+    Gates information flow between workspaces based on phase coherence.
+
+    When source workspace organs are in-phase with the target workspace,
+    more of the source's standing broadcast "bleeds" into the target's
+    competition. This implements inter-workspace Communication Through
+    Coherence (CTC).
+
+    gate = sigmoid(w_coh * coherence + w_sal * salience + bias)
+    output = gate * source_broadcast
+
+    Args:
+        dim: Broadcast content dimension
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.w_coherence = nn.Parameter(torch.tensor(2.0))
+        self.w_salience = nn.Parameter(torch.tensor(0.5))
+        self.bias = nn.Parameter(torch.tensor(-1.0))
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self,
+                source_broadcast: torch.Tensor,
+                source_phases: Optional[torch.Tensor] = None,
+                target_phases: Optional[torch.Tensor] = None,
+                source_salience: float = 0.5) -> torch.Tensor:
+        """
+        Compute gated cross-bleed from source to target workspace.
+
+        Args:
+            source_broadcast: Standing broadcast from source workspace
+            source_phases: Oscillator phases associated with source
+            target_phases: Oscillator phases associated with target
+            source_salience: How salient the source workspace content is
+
+        Returns:
+            Gated content to inject into target workspace
+        """
+        # Compute inter-workspace coherence
+        if source_phases is not None and target_phases is not None:
+            # Mean cosine similarity between phase vectors
+            min_len = min(source_phases.shape[0], target_phases.shape[0])
+            coherence = torch.cos(
+                source_phases[:min_len] - target_phases[:min_len]
+            ).mean()
+        else:
+            coherence = torch.tensor(0.5, device=source_broadcast.device)
+
+        # Gating
+        logit = (self.w_coherence * coherence
+                 + self.w_salience * source_salience
+                 + self.bias)
+        gate = torch.sigmoid(logit)
+
+        # Project and gate
+        projected = self.proj(source_broadcast)
+        return gate * projected
+
+
+class WorkspaceEnsemble(nn.Module):
+    """
+    Collection of N parallel GlobalWorkspace instances with cross-bleed.
+
+    Enables multiple workspaces to run simultaneously — e.g. an active
+    workspace handling the current task while background workspaces
+    maintain standing representations of specialist knowledge (chess,
+    law, music theory, etc.). Phase coherence between workspaces gates
+    how much background context "bleeds" into the active workspace.
+
+    Args:
+        n_workspaces: Number of parallel workspaces
+        content_dim: Content dimension for each workspace
+        workspace_dim: Internal workspace dimension
+        n_slots: Number of competition slots per workspace
+        n_winners: Winners per competition round
+        bleed_strength: Base cross-bleed strength multiplier
+        standing_momentum: EMA momentum for standing broadcasts
+    """
+
+    def __init__(self,
+                 n_workspaces: int = 2,
+                 content_dim: int = 64,
+                 workspace_dim: int = 128,
+                 n_slots: int = 8,
+                 n_winners: int = 1,
+                 bleed_strength: float = 0.3,
+                 standing_momentum: float = 0.9):
+        super().__init__()
+
+        self.n_workspaces = n_workspaces
+        self.content_dim = content_dim
+        self.workspace_dim = workspace_dim
+        self.bleed_strength = bleed_strength
+
+        # Parallel workspaces
+        self.workspaces = nn.ModuleList([
+            GlobalWorkspace(
+                content_dim=content_dim,
+                workspace_dim=workspace_dim,
+                n_slots=n_slots,
+                n_winners=n_winners,
+                context_dim=content_dim,
+            )
+            for _ in range(n_workspaces)
+        ])
+
+        # Standing broadcasts (one per workspace)
+        self.standings = nn.ModuleList([
+            StandingBroadcast(workspace_dim, momentum=standing_momentum)
+            for _ in range(n_workspaces)
+        ])
+
+        # Cross-bleed gates: gate[i] controls bleed FROM workspace i TO others
+        # Total: n_workspaces gates (each workspace has one outgoing gate)
+        self.bleed_gates = nn.ModuleList([
+            CrossBleedGate(workspace_dim)
+            for _ in range(n_workspaces)
+        ])
+
+        # Projection: workspace_dim → content_dim for injecting bleed as context
+        self.bleed_to_context = nn.Linear(workspace_dim, content_dim)
+
+        # Which workspace is foreground
+        self.register_buffer('active_idx', torch.tensor(0))
+
+    def set_active(self, idx: int):
+        """Set which workspace is the foreground (active) workspace."""
+        with torch.no_grad():
+            self.active_idx.fill_(idx)
+
+    def get_bleed_matrix(self) -> torch.Tensor:
+        """
+        Get NxN coherence/bleed matrix for diagnostics.
+
+        Entry [i, j] is how much workspace i bleeds into workspace j.
+        Diagonal is zero (no self-bleed).
+        """
+        mat = torch.zeros(self.n_workspaces, self.n_workspaces)
+        for i in range(self.n_workspaces):
+            source = self.standings[i].get()
+            if source.abs().sum() < 1e-8:
+                continue
+            for j in range(self.n_workspaces):
+                if i == j:
+                    continue
+                gated = self.bleed_gates[i](source)
+                mat[i, j] = gated.abs().mean().item() * self.bleed_strength
+        return mat
+
+    def forward(self,
+                contents_per_ws: List[torch.Tensor],
+                contexts_per_ws: List[torch.Tensor],
+                phases_per_ws: Optional[List[torch.Tensor]] = None,
+                ) -> Dict[str, Any]:
+        """
+        Run all workspaces with cross-bleed.
+
+        Args:
+            contents_per_ws: List of content tensors, one per workspace
+                Each: (batch, n_items, content_dim)
+            contexts_per_ws: List of context tensors, one per workspace
+                Each: (batch, n_context, content_dim)
+            phases_per_ws: Optional list of phase tensors for coherence
+                Each: (n_oscillators,) — used for cross-bleed gating
+
+        Returns:
+            Dict with:
+            - workspace_results: List of per-workspace result dicts
+            - bleed_matrix: NxN bleed strength matrix
+            - standing_broadcasts: List of standing broadcast tensors
+        """
+        assert len(contents_per_ws) == self.n_workspaces
+        assert len(contexts_per_ws) == self.n_workspaces
+
+        workspace_results = []
+
+        # Step 1: Collect cross-bleed from standing broadcasts
+        for j in range(self.n_workspaces):
+            bleed_sum = torch.zeros(
+                1, 1, self.content_dim,
+                device=contents_per_ws[j].device
+            )
+            for i in range(self.n_workspaces):
+                if i == j:
+                    continue
+                source = self.standings[i].get()
+                if source.abs().sum() < 1e-8:
+                    continue
+
+                src_phases = phases_per_ws[i] if phases_per_ws else None
+                tgt_phases = phases_per_ws[j] if phases_per_ws else None
+
+                gated = self.bleed_gates[i](
+                    source,
+                    source_phases=src_phases,
+                    target_phases=tgt_phases,
+                )
+                # Project to content_dim and accumulate
+                bleed_content = self.bleed_to_context(gated)
+                bleed_sum = bleed_sum + bleed_content.unsqueeze(0).unsqueeze(0) * self.bleed_strength
+
+            # Inject bleed as additional context
+            contexts_per_ws[j] = torch.cat([
+                contexts_per_ws[j],
+                bleed_sum.expand(contexts_per_ws[j].shape[0], -1, -1)
+            ], dim=1)
+
+        # Step 2: Run each workspace
+        for i in range(self.n_workspaces):
+            ws_result = self.workspaces[i](
+                contents_per_ws[i],
+                contexts_per_ws[i],
+            )
+            workspace_results.append(ws_result)
+
+            # Step 3: Update standing broadcasts
+            self.standings[i].update(ws_result['workspace'].mean(dim=0))
+
+        # Step 4: Build diagnostics
+        bleed_matrix = self.get_bleed_matrix()
+
+        return {
+            'workspace_results': workspace_results,
+            'bleed_matrix': bleed_matrix,
+            'standing_broadcasts': [s.get() for s in self.standings],
+            'active_idx': self.active_idx.item(),
+        }
+
+    def reset(self):
+        """Reset all workspaces and standing broadcasts."""
+        for ws in self.workspaces:
+            ws.reset()
+        for sb in self.standings:
+            with torch.no_grad():
+                sb.content.zero_()
 
 
 if __name__ == '__main__':

@@ -157,7 +157,7 @@ class MetricCollector:
                 if val is not None:
                     row += f" {_fmt(val)} |"
                 else:
-                    row += " — |"
+                    row += " -- |"
             rows.append(row)
         return header + "\n".join(rows)
 

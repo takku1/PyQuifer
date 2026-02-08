@@ -104,21 +104,25 @@ class EquilibriumPropagationTrainer:
                     # Global topology: mask diagonal
                     mask = 1.0 - torch.eye(n, device=delta.device)
                     delta = delta * mask
-                self.bank.coupling_matrix.data.add_(delta)
+                with torch.no_grad():
+                    self.bank.coupling_matrix.add_(delta)
             elif self.bank.topology == 'learnable':
                 # Fallback: update logits directly (adjacency is sigmoid of logits)
-                self.bank.adjacency_logits.data.add_(delta * self.bank.self_mask)
+                with torch.no_grad():
+                    self.bank.adjacency_logits.add_(delta * self.bank.self_mask)
             elif adj is not None:
                 # For fixed topologies, modulate coupling_strength globally
                 masked_delta = delta * adj
                 mean_update = masked_delta.sum() / adj.sum().clamp(min=1)
-                self.bank.coupling_strength.data.add_(mean_update)
+                with torch.no_grad():
+                    self.bank.coupling_strength.add_(mean_update)
             else:
                 # Global topology: update coupling strength with mean delta
                 mask = 1.0 - torch.eye(n, device=delta.device)
                 masked_delta = delta * mask
                 mean_update = masked_delta.sum() / (n * (n - 1))
-                self.bank.coupling_strength.data.add_(mean_update)
+                with torch.no_grad():
+                    self.bank.coupling_strength.add_(mean_update)
 
     def train_step(self, external_input: Optional[torch.Tensor],
                    loss_fn, target: torch.Tensor) -> Dict:
@@ -140,7 +144,8 @@ class EquilibriumPropagationTrainer:
         initial_phases = self.bank.phases.clone()
 
         # Free phase
-        self.bank.phases.data = initial_phases.clone()
+        with torch.no_grad():
+            self.bank.phases.copy_(initial_phases)
         phases_free = self.free_phase(external_input)
 
         # Compute loss gradient w.r.t. phases
@@ -150,14 +155,16 @@ class EquilibriumPropagationTrainer:
 
         # Nudge phase (restart from FREE equilibrium, not initial)
         # This ensures both phases start from the same attractor
-        self.bank.phases.data = phases_free.clone()
+        with torch.no_grad():
+            self.bank.phases.copy_(phases_free)
         phases_nudge = self.nudge_phase(loss_grad, external_input)
 
         # Update couplings via local rule
         self.update_couplings(phases_free, phases_nudge)
 
         # Restore to free-phase equilibrium
-        self.bank.phases.data = phases_free
+        with torch.no_grad():
+            self.bank.phases.copy_(phases_free.detach())
 
         phase_shift = (phases_nudge - phases_free).abs().mean().item()
 
@@ -271,7 +278,8 @@ class EPKuramotoClassifier(nn.Module):
 
             # Fix 2: Use warm-start phases instead of random init
             initial_phases = self.bank.phases.clone()
-            self.bank.phases.data = self._get_initial_phases()
+            with torch.no_grad():
+                self.bank.phases.copy_(self._get_initial_phases())
 
             # Fix 3: Don't detach encoder output — allow gradient flow
             # for classification loss (EP coupling updates are still local/no_grad)
@@ -288,7 +296,8 @@ class EPKuramotoClassifier(nn.Module):
             all_logits.append(logits)
 
             # Restore phases for next sample
-            self.bank.phases.data = initial_phases
+            with torch.no_grad():
+                self.bank.phases.copy_(initial_phases)
 
         result = torch.stack(all_logits)
         return result.squeeze(0) if was_1d else result
