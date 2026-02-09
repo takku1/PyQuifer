@@ -19,10 +19,11 @@ os.makedirs(os.path.join(os.path.dirname(__file__), 'results'), exist_ok=True)
 results_dir = os.path.join(os.path.dirname(__file__), 'results')
 
 timings = {}
+total_sections = 14
 
-# ── 1. Module throughput (no training, fast) ──
+# ── 1/14. Module throughput (no training, fast) ──
 print("=" * 60)
-print("1/6  bench_modules (throughput)")
+print("1/14  bench_modules (throughput)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -34,9 +35,9 @@ except Exception as e:
     print(f"  FAILED: {e}")
     timings['modules'] = -1
 
-# ── 2. Consciousness metrics (no training, fast) ──
+# ── 2/14. Consciousness metrics (no training, fast) ──
 print("\n" + "=" * 60)
-print("2/6  bench_consciousness (PCI, metastability)")
+print("2/14  bench_consciousness (PCI, metastability)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -48,9 +49,9 @@ except Exception as e:
     print(f"  FAILED: {e}")
     timings['consciousness'] = -1
 
-# ── 3. Efficiency sweeps (no training, fast) ──
+# ── 3/14. Efficiency sweeps (no training, fast) ──
 print("\n" + "=" * 60)
-print("3/6  bench_efficiency (dtype, compile, scaling)")
+print("3/14  bench_efficiency (dtype, compile, scaling)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -62,9 +63,9 @@ except Exception as e:
     print(f"  FAILED: {e}")
     timings['efficiency'] = -1
 
-# ── 4. EP training (tiny: 500 samples, 3 epochs) ──
+# ── 4/14. EP training (tiny: 500 samples, 3 epochs) ──
 print("\n" + "=" * 60)
-print("4/6  bench_ep_training (MNIST 500 samples, 3 epochs)")
+print("4/14  bench_ep_training (MNIST 500 samples, 3 epochs)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -113,9 +114,9 @@ except Exception as e:
     import traceback; traceback.print_exc()
     timings['ep_training'] = -1
 
-# ── 5. Local rules (tiny: 500 samples, 3 epochs) ──
+# ── 5/14. Local rules (tiny: 500 samples, 3 epochs) ──
 print("\n" + "=" * 60)
-print("5/6  bench_local_rules (500 samples, 3 epochs)")
+print("5/14  bench_local_rules (500 samples, 3 epochs)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -151,9 +152,9 @@ except Exception as e:
     import traceback; traceback.print_exc()
     timings['local_rules'] = -1
 
-# ── 6. Continual learning (tiny: 300 samples, 2 epochs/task) ──
+# ── 6/14. Continual learning (tiny: 300 samples, 2 epochs/task) ──
 print("\n" + "=" * 60)
-print("6/6  bench_continual (300 samples, 2 epochs/task)")
+print("6/14  bench_continual (300 samples, 2 epochs/task)")
 print("=" * 60)
 t0 = time.time()
 try:
@@ -178,17 +179,144 @@ except Exception as e:
     import traceback; traceback.print_exc()
     timings['continual'] = -1
 
+# ── 7/14. Robustness (tiny noise sweep) ──
+print("\n" + "=" * 60)
+print("7/14  bench_robustness (noise sweep)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_robustness import run_full_suite as run_robustness
+    run_robustness()
+    timings['robustness'] = time.time() - t0
+    print(f"  Done in {timings['robustness']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['robustness'] = -1
+
+# ── 8/14. Chess (fortress detection) ──
+print("\n" + "=" * 60)
+print("8/14  bench_chess (fortress tests)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_chess import run_full_suite as run_chess
+    run_chess()
+    timings['chess'] = time.time() - t0
+    print(f"  Done in {timings['chess']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['chess'] = -1
+
+# ── 9/14. ChessQA (5-category quick eval, 10 samples each) ──
+print("\n" + "=" * 60)
+print("9/14  bench_chessqa (5 categories, 10 samples each)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_chessqa import has_chessqa_data, run_three_column_suite as run_chessqa
+    if has_chessqa_data():
+        run_chessqa(max_per_category=10)
+        timings['chessqa'] = time.time() - t0
+        print(f"  Done in {timings['chessqa']:.1f}s")
+    else:
+        print("  SKIPPED: ChessQA data not available")
+        timings['chessqa'] = 0
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['chessqa'] = -1
+
+# ── 10/14. Searchless Chess (position eval, small set) ──
+print("\n" + "=" * 60)
+print("10/14  bench_searchless_chess (position eval)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_searchless_chess import run_three_column_suite as run_searchless
+    run_searchless()
+    timings['searchless_chess'] = time.time() - t0
+    print(f"  Done in {timings['searchless_chess']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['searchless_chess'] = -1
+
+# ── 11/14. Cycle (CognitiveCycle throughput) ──
+print("\n" + "=" * 60)
+print("11/14  bench_cycle (CognitiveCycle throughput)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_cycle import run_full_suite as run_cycle
+    run_cycle()
+    timings['cycle'] = time.time() - t0
+    print(f"  Done in {timings['cycle']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['cycle'] = -1
+
+# ── 12/14. LLM A/B (dummy model only, no real LLM) ──
+print("\n" + "=" * 60)
+print("12/14  bench_llm_ab (dummy model, no real LLM)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_llm_ab import run_full_suite as run_llm_ab
+    run_llm_ab()
+    timings['llm_ab'] = time.time() - t0
+    print(f"  Done in {timings['llm_ab']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['llm_ab'] = -1
+
+# ── 13/14. Predictive Coding (if Torch2PC available, else skip) ──
+print("\n" + "=" * 60)
+print("13/14  bench_predictive_coding (Torch2PC comparison)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_predictive_coding import run_full_suite as run_predcoding
+    run_predcoding()
+    timings['predictive_coding'] = time.time() - t0
+    print(f"  Done in {timings['predictive_coding']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['predictive_coding'] = -1
+
+# ── 14/14. Penrose Chess (fortress detection) ──
+print("\n" + "=" * 60)
+print("14/14  bench_penrose_chess (Penrose fortress)")
+print("=" * 60)
+t0 = time.time()
+try:
+    from bench_penrose_chess import run_three_column_suite as run_penrose
+    run_penrose()
+    timings['penrose_chess'] = time.time() - t0
+    print(f"  Done in {timings['penrose_chess']:.1f}s")
+except Exception as e:
+    print(f"  FAILED: {e}")
+    timings['penrose_chess'] = -1
+
 # ── Summary ──
 print("\n" + "=" * 60)
 print("TIMING SUMMARY")
 print("=" * 60)
 total = 0
+passed = 0
+failed = 0
+skipped = 0
 for name, t in timings.items():
-    status = f"{t:.1f}s" if t >= 0 else "FAILED"
-    print(f"  {name:20s}: {status}")
     if t > 0:
+        status = f"{t:.1f}s"
         total += t
-print(f"  {'TOTAL':20s}: {total:.1f}s")
+        passed += 1
+    elif t == 0:
+        status = "SKIPPED"
+        skipped += 1
+    else:
+        status = "FAILED"
+        failed += 1
+    print(f"  {name:24s}: {status}")
+print(f"  {'TOTAL':24s}: {total:.1f}s")
+print(f"  Passed: {passed}/{total_sections}  Failed: {failed}  Skipped: {skipped}")
 
 with open(os.path.join(results_dir, 'quick_timings.json'), 'w') as f:
     json.dump(timings, f, indent=2)

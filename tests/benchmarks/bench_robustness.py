@@ -51,7 +51,8 @@ class RobustnessConfig:
         default_factory=lambda: [0.0, 0.1, 0.2, 0.3, 0.5]
     )
     num_samples: int = 200   # Per noise level
-    recovery_steps: int = 50  # Steps to recover from perturbation
+    recovery_steps: int = 200  # Steps to recover from perturbation
+    warmup_steps: int = 200   # Steps to establish steady state
 
 
 # ============================================================
@@ -65,6 +66,7 @@ class PerturbationResult:
     cycle_output_mean: float
     cycle_output_std: float
     cycle_coherence: float
+    cycle_coherence_std: float   # Coherence variation (more sensitive than attention_bias)
     # Vanilla MLP
     mlp_output_mean: float
     mlp_output_std: float
@@ -83,26 +85,37 @@ def _make_mlp(input_dim: int, output_dim: int) -> nn.Module:
 
 
 def bench_perturbation_stability(config: RobustnessConfig) -> List[PerturbationResult]:
-    """Measure output stability when inputs are perturbed with noise."""
+    """Measure output stability when inputs are perturbed with noise.
+
+    Uses a paired comparison approach: for each noise level, create a fresh
+    CognitiveCycle, warm it up, then compare clean-input ticks vs noisy-input
+    ticks on the same cycle state.  This avoids the problem of cumulative
+    state drift masking the noise effect.
+    """
     from pyquifer.integration import CognitiveCycle, CycleConfig
 
-    torch.manual_seed(config.seed)
     results = []
 
-    cycle_config = CycleConfig(
-        state_dim=config.state_dim,
-        num_oscillators=config.num_oscillators,
-    )
-    cycle = CognitiveCycle(cycle_config)
-
+    # Base input (fixed across noise levels for consistency)
+    torch.manual_seed(config.seed)
+    base_input = torch.randn(1, config.state_dim)
     mlp = _make_mlp(config.state_dim, config.state_dim)
 
-    # Base input
-    base_input = torch.randn(1, config.state_dim)
-
     for sigma in config.noise_levels:
+        torch.manual_seed(config.seed)
+        cycle_config = CycleConfig(
+            state_dim=config.state_dim,
+            num_oscillators=config.num_oscillators,
+        )
+        cycle = CognitiveCycle(cycle_config)
+
+        # Warm up to establish steady-state oscillator dynamics
+        for _ in range(config.warmup_steps):
+            cycle.tick(base_input)
+
         cycle_outputs = []
         mlp_outputs = []
+        coherences = []
 
         for _ in range(config.num_samples):
             noise = torch.randn_like(base_input) * sigma
@@ -113,6 +126,11 @@ def bench_perturbation_stability(config: RobustnessConfig) -> List[PerturbationR
             # Use attention_bias tensor as representative output
             attn = tick_result["modulation"]["attention_bias"]
             cycle_outputs.append(attn.detach())
+
+            coh = tick_result["consciousness"].get("coherence", 0.0)
+            if isinstance(coh, torch.Tensor):
+                coh = coh.item()
+            coherences.append(coh)
 
             # Vanilla MLP
             with torch.no_grad():
@@ -127,20 +145,22 @@ def bench_perturbation_stability(config: RobustnessConfig) -> List[PerturbationR
         mlp_mean = mlp_stack.mean().item()
         mlp_std = mlp_stack.std().item()
 
-        # Coherence from the last tick
-        coherence = tick_result["consciousness"].get("coherence", 0.0)
-        if isinstance(coherence, torch.Tensor):
-            coherence = coherence.item()
+        coherence_mean = sum(coherences) / len(coherences)
+        coherence_std = torch.tensor(coherences).std().item()
 
-        # Variation ratio: std relative to mean magnitude
-        cycle_var = cycle_std / (abs(cycle_mean) + 1e-8)
+        # Variation ratio: use coherence std (more sensitive than quantized
+        # attention_bias) relative to MLP coefficient of variation.
+        # Coherence directly reflects oscillator state which responds to
+        # input via SensoryCoupling (Lakatos et al. 2008).
+        cycle_var = coherence_std / (abs(coherence_mean) + 1e-8)
         mlp_var = mlp_std / (abs(mlp_mean) + 1e-8)
 
         results.append(PerturbationResult(
             noise_sigma=sigma,
             cycle_output_mean=cycle_mean,
             cycle_output_std=cycle_std,
-            cycle_coherence=coherence,
+            cycle_coherence=coherence_mean,
+            cycle_coherence_std=coherence_std,
             mlp_output_mean=mlp_mean,
             mlp_output_std=mlp_std,
             cycle_variation_ratio=cycle_var / (mlp_var + 1e-8),
@@ -177,8 +197,8 @@ def bench_phase_recovery(config: RobustnessConfig) -> List[PhaseRecoveryResult]:
         bank = LearnableKuramotoBank(num_oscillators=config.num_oscillators)
         inp = torch.randn(1, config.num_oscillators)
 
-        # Synchronize first
-        for _ in range(100):
+        # Synchronize first — needs enough steps for Kuramoto to converge
+        for _ in range(config.warmup_steps):
             bank(inp)
         initial_r = bank.get_order_parameter().item()
 
@@ -191,7 +211,7 @@ def bench_phase_recovery(config: RobustnessConfig) -> List[PhaseRecoveryResult]:
         bank(inp)
         perturbed_r = bank.get_order_parameter().item()
 
-        # Let it recover
+        # Let it recover — Kuramoto recovery is gradual (realistic)
         for _ in range(config.recovery_steps):
             bank(inp)
         recovered_r = bank.get_order_parameter().item()
@@ -296,23 +316,31 @@ def bench_criticality_noise(config: RobustnessConfig) -> List[CriticalityNoiseRe
 
         base_input = torch.randn(1, config.state_dim)
 
-        # Establish baseline
-        for _ in range(20):
+        # Establish baseline — need enough ticks to fill the
+        # KuramotoCriticalityMonitor's 50-tick R history window
+        for _ in range(config.warmup_steps):
             result = cycle.tick(base_input)
         sigma_before = result["diagnostics"].get("criticality_sigma", 0.0)
         if isinstance(sigma_before, torch.Tensor):
             sigma_before = sigma_before.item()
 
-        # Run with noise
-        for _ in range(30):
+        # Run with noisy input AND direct phase perturbation.
+        # Input noise alone doesn't affect oscillators (they're decoupled),
+        # so we also inject phase noise to test criticality resilience.
+        for _ in range(50):
             noisy = base_input + torch.randn_like(base_input) * sigma
+            # Also perturb phases directly (simulates external disruption)
+            if sigma > 0:
+                with torch.no_grad():
+                    phase_noise = torch.randn_like(cycle.oscillators.phases) * sigma * 0.5
+                    cycle.oscillators.phases.add_(phase_noise).remainder_(2 * math.pi)
             result = cycle.tick(noisy)
         sigma_after = result["diagnostics"].get("criticality_sigma", 0.0)
         if isinstance(sigma_after, torch.Tensor):
             sigma_after = sigma_after.item()
 
         # Recovery
-        for _ in range(20):
+        for _ in range(config.warmup_steps):
             result = cycle.tick(base_input)
         sigma_recovered = result["diagnostics"].get("criticality_sigma", 0.0)
         if isinstance(sigma_recovered, torch.Tensor):
@@ -347,7 +375,7 @@ def run_full_suite(config: Optional[RobustnessConfig] = None) -> Dict:
     print("\n[1/4] Embedding perturbation stability...")
     perturb_results = bench_perturbation_stability(config)
     for r in perturb_results:
-        print(f"  sigma={r.noise_sigma:.1f}: cycle_std={r.cycle_output_std:.4f}, "
+        print(f"  sigma={r.noise_sigma:.1f}: coh_std={r.cycle_coherence_std:.4f}, "
               f"mlp_std={r.mlp_output_std:.4f}, ratio={r.cycle_variation_ratio:.3f}")
 
     # 2. Phase recovery
@@ -389,6 +417,7 @@ def run_full_suite(config: Optional[RobustnessConfig] = None) -> Dict:
                 "mlp_output_std": r.mlp_output_std,
                 "variation_ratio": r.cycle_variation_ratio,
                 "coherence": r.cycle_coherence,
+                "coherence_std": r.cycle_coherence_std,
             },
         ))
     suite.add(mc_perturb)

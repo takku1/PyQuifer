@@ -177,16 +177,31 @@ class CognitiveCycle(nn.Module):
         self.register_buffer('tick_count', torch.tensor(0))
 
         # === Layer 3: Dynamical Core ===
-        from pyquifer.oscillators import LearnableKuramotoBank
+        from pyquifer.oscillators import LearnableKuramotoBank, SensoryCoupling
         self.oscillators = LearnableKuramotoBank(
             num_oscillators=c.num_oscillators,
             dt=c.oscillator_dt,
             integration_method=c.integration_method,
         )
 
-        from pyquifer.criticality import CriticalityController
+        # Sensory-oscillator coupling: frequency entrainment, phase resets,
+        # coupling modulation from input (Lakatos et al. 2008; Fries 2005)
+        self._sensory_coupling = SensoryCoupling(
+            input_dim=c.state_dim,
+            num_oscillators=c.num_oscillators,
+        )
+
+        from pyquifer.criticality import (
+            CriticalityController, KuramotoCriticalityMonitor,
+            phase_activity_to_spikes,
+        )
+        self._phase_to_spikes = phase_activity_to_spikes
         self.criticality = CriticalityController(
             target_branching_ratio=c.target_branching_ratio,
+        )
+        # Kuramoto-specific criticality: uses order parameter R directly
+        self._kuramoto_criticality = KuramotoCriticalityMonitor(
+            window_size=50,
         )
 
         from pyquifer.metastability import MetastabilityIndex
@@ -200,6 +215,7 @@ class CognitiveCycle(nn.Module):
             level_dims=c.hierarchy_dims,
             lr=c.hpc_lr,
             gen_lr=c.hpc_gen_lr,
+            learn_every=3,  # amortize autograd cost: learn every 3rd tick
         )
 
         from pyquifer.precision_weighting import AttentionAsPrecision
@@ -599,8 +615,36 @@ class CognitiveCycle(nn.Module):
 
         device = sensory_input.device
 
+        # ── Step 0: Sensory-oscillator coupling ──
+        # Input drives oscillators via frequency entrainment, phase resets,
+        # and coupling modulation (Lakatos et al. 2008; Fries 2005 CTC).
+        # All modifications are within torch.no_grad — gradient flow from
+        # the LLM to oscillators is severed by design.
+        sc = self._sensory_coupling(sensory_input[0], self.oscillators.phases)
+
+        with torch.no_grad():
+            # Phase reset: novel stimuli partially reset phases toward
+            # input-derived targets (event-related desynchronization)
+            reset_s = sc['reset_strength']
+            if reset_s > 0.05:
+                blended = (
+                    (1.0 - reset_s) * self.oscillators.phases
+                    + reset_s * sc['phase_targets']
+                ) % (2 * math.pi)
+                self.oscillators.phases.copy_(blended)
+
+            # Coupling modulation: input salience scales K
+            self.oscillators.coupling_strength.data.mul_(
+                sc['coupling_scale']
+            ).clamp_(min=0.1, max=5.0)
+
         # ── Step 1: Oscillator dynamics ──
-        phases = self.oscillators(steps=1, use_precision=True)
+        # Frequency entrainment: input energy shifts natural frequencies
+        phases = self.oscillators(
+            external_input=sc['freq_modulation'],
+            steps=1,
+            use_precision=True,
+        )
         order_param = self.oscillators.get_order_parameter()
         coherence = order_param.item() if isinstance(order_param, torch.Tensor) else order_param
 
@@ -635,10 +679,72 @@ class CognitiveCycle(nn.Module):
             }
 
         # ── Step 2: Criticality check ──
-        # Use oscillator phases as activity signal
-        activity = torch.sin(phases)
-        crit = self.criticality(activity)
+        # Use Kuramoto-specific criticality monitor based on order parameter R
+        # This is the correct metric for continuous oscillator networks:
+        # susceptibility χ = N·var(R) peaks at the critical coupling K_c
+        R_current = self.oscillators.get_order_parameter()
+        crit = self._kuramoto_criticality(
+            R_current, num_oscillators=self.oscillators.num_oscillators,
+        )
         criticality_distance = crit['criticality_distance'].item()
+
+        # Also feed spike-based activity to the PI controller (for avalanche tracking)
+        spike_count = self._phase_to_spikes(phases)
+        crit_pi = self.criticality(spike_count)
+
+        # Close the criticality feedback loop using dual-timescale control,
+        # mirroring how real cortex maintains criticality:
+        #
+        # SLOW PATH (homeostatic plasticity): Adjust coupling K based on
+        # the windowed sigma (~50 ticks). Like synaptic homeostasis that
+        # adapts excitatory/inhibitory balance over minutes/hours.
+        #
+        # FAST PATH (GABAergic inhibition): Inject dephasing noise based
+        # on INSTANTANEOUS R, not the lagged sigma. Like fast inhibitory
+        # interneurons that prevent epileptic hypersynchrony within ms.
+        #
+        # This dual-timescale approach prevents the limit-cycle oscillation
+        # that occurs when both paths use the lagged sigma: by the time
+        # sigma reports "supercritical", R is already at 0.9 and deeply
+        # phase-locked. The fast path catches this before it happens.
+        # (Poil et al. 2012 J Neurosci — homeostatic criticality;
+        #  Brunel & Wang 2003 J Comp Neurosci — E/I balance)
+        crit_sigma = crit['branching_ratio'].item()
+        R_instant = R_current.item() if isinstance(R_current, torch.Tensor) \
+            else float(R_current)
+
+        with torch.no_grad():
+            # ── SLOW PATH: Homeostatic coupling adjustment ──
+            sigma_error = crit_sigma - 1.0
+            abs_err = abs(sigma_error)
+            if abs_err < 0.15:
+                gain = 0.0005  # deadzone: near-critical, minimal nudge
+            elif sigma_error > 0:
+                gain = 0.005 + 0.03 * sigma_error
+            else:
+                gain = 0.008 + 0.05 * abs_err
+            coupling_delta = -sigma_error * gain
+            new_K = self.oscillators.coupling_strength.data + coupling_delta
+            self.oscillators.coupling_strength.data.copy_(
+                new_K.clamp(min=0.1, max=5.0)
+            )
+
+            # ── FAST PATH: Inhibitory dephasing on instantaneous R ──
+            # Activates when R exceeds the critical center (R≈0.5).
+            # This keeps R in the 0.4-0.6 band where sigma≈1.0 (true
+            # critical point), rather than letting it reach 0.7+ where
+            # sigma reads "deeply supercritical" and the slow path
+            # over-corrects.
+            #
+            # Gentle near center, strong far above:
+            #   R=0.55 → 0.08rad (gentle nudge)
+            #   R=0.65 → 0.23rad (moderate)
+            #   R=0.80 → 0.45rad (strong desync)
+            R_excess = max(0.0, R_instant - 0.5)
+            if R_excess > 0.02:  # small deadzone around center
+                noise_scale = min(0.8, (R_excess - 0.02) * 1.5)
+                dephasing = torch.randn_like(self.oscillators.phases) * noise_scale
+                self.oscillators.phases.add_(dephasing).remainder_(2 * math.pi)
 
         # ── Step 2b: Optional Koopman bifurcation detection ──
         koopman_info = {}
@@ -1069,7 +1175,9 @@ class CognitiveCycle(nn.Module):
                 'free_energy': free_energy.item(),
                 'coherence': coherence,
                 'criticality_distance': criticality_distance,
+                'criticality_sigma': crit['branching_ratio'].item(),
                 'branching_ratio': crit['branching_ratio'].item(),
+                'susceptibility': crit['susceptibility'].item(),
                 'coalition_entropy': coalition_entropy,
                 'dominance_ratio': dominance_ratio,
                 'processing_mode': processing_mode,
@@ -1099,6 +1207,15 @@ class CognitiveCycle(nn.Module):
                 'precision': prec_result['precision'].detach(),
                 'resources': arena_result['resources'].detach(),
                 'neuromodulator_levels': levels.detach(),
+                # Criticality metrics (accessible here for benchmarks)
+                'criticality_sigma': crit['branching_ratio'].item(),
+                'branching_ratio': crit['branching_ratio'].item(),
+                'criticality_distance': criticality_distance,
+                'susceptibility': crit['susceptibility'].item(),
+                'R_mean_crit': crit['R_mean'].item(),
+                'R_var_crit': crit['R_var'].item(),
+                'coupling_adjustment': crit_pi['coupling_adjustment'].item(),
+                'noise_adjustment': crit_pi['noise_adjustment'].item(),
                 **stuart_landau_info,
                 **mean_field_info,
                 **koopman_info,
@@ -1116,6 +1233,13 @@ class CognitiveCycle(nn.Module):
                 **personality_info,
                 **somatic_info,
                 'theta_gate_value': theta_gate_value,
+                'input_novelty': sc['input_novelty'],
+                'phase_reset_strength': sc['reset_strength'].item()
+                    if isinstance(sc['reset_strength'], torch.Tensor)
+                    else sc['reset_strength'],
+                'coupling_scale': sc['coupling_scale'].item()
+                    if isinstance(sc['coupling_scale'], torch.Tensor)
+                    else sc['coupling_scale'],
             },
         }
 

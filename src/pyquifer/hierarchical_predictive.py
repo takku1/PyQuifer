@@ -48,7 +48,8 @@ class PredictiveLevel(nn.Module):
                  lr: float = 0.1,
                  gen_lr: float = 0.01,
                  use_exact_gradients: bool = False,
-                 precision_ema: float = 0.05):
+                 precision_ema: float = 0.05,
+                 learn_every: int = 1):
         """
         Args:
             input_dim: Dimension of input from level below
@@ -61,6 +62,9 @@ class PredictiveLevel(nn.Module):
                                 updates (G-12, SetPCGrads-style).
             precision_ema: EMA decay rate for precision estimation from
                           prediction error variance (G-11).
+            learn_every: Run generative/recognition learning every N calls.
+                        Higher values reduce autograd overhead at the cost of
+                        slower model adaptation. Default 1 (every call).
         """
         super().__init__()
         self.input_dim = input_dim
@@ -69,9 +73,11 @@ class PredictiveLevel(nn.Module):
         self.gen_lr = gen_lr
         self.use_exact_gradients = use_exact_gradients
         self.precision_ema = precision_ema
+        self.learn_every = learn_every
 
         # Beliefs (current best estimate of causes)
         self.register_buffer('beliefs', torch.zeros(belief_dim))
+        self.register_buffer('_call_count', torch.tensor(0, dtype=torch.long))
 
         # Generative model: beliefs → predicted input from below
         self.generative = nn.Sequential(
@@ -159,40 +165,52 @@ class PredictiveLevel(nn.Module):
         # Online learning: update generative and recognition models to reduce
         # prediction error. This is the key mechanism that makes error DECREASE
         # over repeated exposure (not just belief convergence).
-        if self.gen_lr > 0:
-            # Train generative model: g(beliefs) should predict input
-            pred_for_learn = self.generative(self.beliefs.detach().unsqueeze(0).expand(batch, -1))
-            gen_loss = (bottom_up_input.detach() - pred_for_learn).pow(2).mean()
-            gen_grads = torch.autograd.grad(
-                gen_loss, self.generative.parameters(), create_graph=False
+        # Uses .backward() instead of autograd.grad() for lower overhead,
+        # and only runs every learn_every calls to amortize the cost.
+        with torch.no_grad():
+            self._call_count.add_(1)
+        should_learn = (self.gen_lr > 0
+                        and self._call_count.item() % self.learn_every == 0)
+
+        if should_learn:
+            # Zero grads once for both models
+            self.generative.zero_grad(set_to_none=True)
+            self.recognition.zero_grad(set_to_none=True)
+
+            # Train generative model: reuse prediction (already computed above)
+            # Recompute from detached beliefs to get clean gradient graph
+            pred_for_learn = self.generative(
+                self.beliefs.detach().unsqueeze(0).expand(batch, -1)
             )
+            gen_loss = (bottom_up_input.detach() - pred_for_learn).pow(2).mean()
+            gen_loss.backward()
             with torch.no_grad():
-                for param, grad in zip(self.generative.parameters(), gen_grads):
-                    param.add_(-self.gen_lr * grad)
+                for param in self.generative.parameters():
+                    if param.grad is not None:
+                        param.add_(-self.gen_lr * param.grad)
 
             # Train recognition model: r(input) should estimate beliefs
+            self.recognition.zero_grad(set_to_none=True)
             rec_pred = self.recognition(bottom_up_input.detach())
             rec_target = self.beliefs.detach().unsqueeze(0).expand(batch, -1)
             rec_loss = (rec_target - rec_pred).pow(2).mean()
-            rec_grads = torch.autograd.grad(
-                rec_loss, self.recognition.parameters(), create_graph=False
-            )
+            rec_loss.backward()
             with torch.no_grad():
-                for param, grad in zip(self.recognition.parameters(), rec_grads):
-                    param.add_(-self.gen_lr * grad)
+                for param in self.recognition.parameters():
+                    if param.grad is not None:
+                        param.add_(-self.gen_lr * param.grad)
 
         # G-12: Exact gradient pass through full generative graph
-        if self.use_exact_gradients and self.gen_lr > 0:
-            # Separate supervised-style update using standard backward
+        if self.use_exact_gradients and should_learn:
+            self.generative.zero_grad(set_to_none=True)
             beliefs_for_exact = self.beliefs.detach().unsqueeze(0).expand(batch, -1)
             exact_pred = self.generative(beliefs_for_exact)
             exact_loss = (prec * (bottom_up_input.detach() - exact_pred).pow(2)).mean()
-            exact_grads = torch.autograd.grad(
-                exact_loss, self.generative.parameters(), create_graph=False
-            )
+            exact_loss.backward()
             with torch.no_grad():
-                for param, grad in zip(self.generative.parameters(), exact_grads):
-                    param.add_(-self.gen_lr * 0.5 * grad)  # half-rate to avoid overshooting
+                for param in self.generative.parameters():
+                    if param.grad is not None:
+                        param.add_(-self.gen_lr * 0.5 * param.grad)
 
         return {
             'prediction': prediction,
@@ -206,6 +224,7 @@ class PredictiveLevel(nn.Module):
         self.beliefs.zero_()
         self.precision.fill_(1.0)
         self.error_variance.fill_(1.0)
+        self._call_count.zero_()
 
 
 class HierarchicalPredictiveCoding(nn.Module):
@@ -226,7 +245,8 @@ class HierarchicalPredictiveCoding(nn.Module):
                  level_dims: List[int],
                  lr: float = 0.1,
                  gen_lr: float = 0.01,
-                 num_iterations: int = 3):
+                 num_iterations: int = 3,
+                 learn_every: int = 1):
         """
         Args:
             level_dims: Dimensions for each level, bottom to top.
@@ -234,6 +254,8 @@ class HierarchicalPredictiveCoding(nn.Module):
             lr: Base learning rate for belief updates
             gen_lr: Learning rate for online generative/recognition model learning
             num_iterations: Number of message-passing iterations per forward call
+            learn_every: Run generative/recognition model learning every N calls.
+                        Default 1 (every call). Set to 5 for ~3x speedup.
         """
         super().__init__()
         self.num_levels = len(level_dims)
@@ -253,7 +275,10 @@ class HierarchicalPredictiveCoding(nn.Module):
             else:
                 input_dim = level_dims[i - 1]
                 belief_dim = level_dims[i]
-            levels.append(PredictiveLevel(input_dim, belief_dim, lr=lr, gen_lr=gen_lr))
+            levels.append(PredictiveLevel(
+                input_dim, belief_dim, lr=lr, gen_lr=gen_lr,
+                learn_every=learn_every,
+            ))
         self.levels = nn.ModuleList(levels)
 
     def forward(self,

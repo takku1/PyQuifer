@@ -226,6 +226,24 @@ class LearnableKuramotoBank(nn.Module):
                 adj[i, (i - j) % n] = 1
         return adj
 
+    # ── Phase buffers must stay fp32 for numerical stability ──
+    # bfloat16 has only 8 mantissa bits → modular arithmetic near
+    # 2*pi accumulates ~10% drift.  Override _apply so that device
+    # changes (.cuda()) work normally but dtype casts leave phase
+    # accumulators in fp32.
+    _FP32_BUFFERS = frozenset({
+        'phases', 'prev_phases', 'phase_velocity_var', 'precision',
+    })
+
+    def _apply(self, fn):
+        """Preserve fp32 for phase-accumulator buffers."""
+        super()._apply(fn)
+        for name in self._FP32_BUFFERS:
+            buf = self._buffers.get(name)
+            if buf is not None and buf.dtype != torch.float32:
+                self._buffers[name] = buf.float()
+        return self
+
     def get_adjacency(self) -> Optional[torch.Tensor]:
         """Get the current adjacency matrix (handles learnable case)."""
         if self.topology == 'learnable':
@@ -496,6 +514,125 @@ class LearnableKuramotoBank(nn.Module):
         local_mean = neighbor_sum / neighbor_count
 
         return torch.abs(local_mean)
+
+
+class SensoryCoupling(nn.Module):
+    """Couples sensory input to oscillator dynamics.
+
+    Implements three biologically-motivated coupling mechanisms:
+
+    1. **Frequency entrainment**: Input energy modulates natural frequencies.
+       Arousing stimuli speed oscillators; quiet input lets intrinsic rhythm
+       dominate.  (Lakatos et al. 2008, Science)
+
+    2. **Phase reset**: Novel stimuli trigger partial phase resets toward
+       input-derived target phases (event-related desynchronization /
+       resynchronization).  (Makeig et al. 2002, Science)
+
+    3. **Coupling modulation**: Input salience scales the coupling strength K.
+       Strong stimuli increase K (attentional gain), weak stimuli reduce it.
+       (Fries 2005 Trends Cogn Sci — CTC hypothesis)
+
+    All projections are **fixed random** (no backprop from LLM), respecting the
+    design invariant: oscillators evolve through own dynamics, gradient flow from
+    the language model is severed by design.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_oscillators: int,
+        entrainment_strength: float = 0.05,
+        phase_reset_threshold: float = 1.5,
+        coupling_mod_range: tuple = (0.9, 1.1),
+        novelty_ema_alpha: float = 0.1,
+    ):
+        super().__init__()
+        self.num_oscillators = num_oscillators
+        self.entrainment_strength = entrainment_strength
+        self.phase_reset_threshold = phase_reset_threshold
+        self.coupling_mod_lo, self.coupling_mod_hi = coupling_mod_range
+        self._ema_alpha = novelty_ema_alpha
+
+        # Fixed random projections (NOT learned via backprop)
+        freq_proj = torch.randn(num_oscillators, input_dim) / (input_dim ** 0.5)
+        self.register_buffer('freq_projection', freq_proj)
+
+        phase_proj = torch.randn(num_oscillators, input_dim) / (input_dim ** 0.5)
+        self.register_buffer('phase_projection', phase_proj)
+
+        # Running statistics for novelty detection
+        self.register_buffer('input_ema', torch.zeros(input_dim))
+        self.register_buffer('input_var_ema', torch.ones(1))
+        self.register_buffer('prev_input_norm', torch.zeros(1))
+
+    @torch.no_grad()
+    def forward(
+        self,
+        sensory_input: torch.Tensor,
+        current_phases: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Compute coupling signals from sensory input.
+
+        Args:
+            sensory_input: (state_dim,) or (1, state_dim) sensory vector
+            current_phases: (num_oscillators,) current oscillator phases
+
+        Returns:
+            Dict with:
+            - freq_modulation: (num_oscillators,) additive frequency shift
+            - reset_strength: scalar 0-1 how strongly to reset phases
+            - phase_targets: (num_oscillators,) target phases for reset
+            - coupling_scale: scalar multiplicative K adjustment
+            - input_novelty: scalar novelty measure (for diagnostics)
+        """
+        x = sensory_input.detach().flatten()
+        in_dim = self.freq_projection.shape[1]
+        if x.shape[0] > in_dim:
+            x = x[:in_dim]
+        elif x.shape[0] < in_dim:
+            x = torch.nn.functional.pad(x, (0, in_dim - x.shape[0]))
+
+        # ── 1. Frequency entrainment ──
+        # Project input to oscillator space, scale by entrainment strength.
+        # Positive projection = speed up, negative = slow down.
+        freq_mod = (self.freq_projection @ x) * self.entrainment_strength
+
+        # ── 2. Novelty detection → phase reset ──
+        # Compare current input to running EMA (habituation).
+        diff = x - self.input_ema
+        novelty = diff.norm() / (self.input_var_ema.sqrt() + 1e-8)
+
+        # Update running statistics
+        self.input_ema.mul_(1 - self._ema_alpha).add_(x * self._ema_alpha)
+        var_instant = diff.pow(2).mean()
+        self.input_var_ema.mul_(1 - self._ema_alpha).add_(
+            var_instant * self._ema_alpha
+        )
+        self.prev_input_norm.copy_(x.norm().unsqueeze(0) if x.norm().dim() == 0 else x.norm())
+
+        # Reset strength: sigmoid around threshold
+        reset_strength = torch.sigmoid(
+            (novelty - self.phase_reset_threshold) * 3.0
+        )
+
+        # Target phases derived from input content
+        phase_targets = (self.phase_projection @ x) % (2 * math.pi)
+
+        # ── 3. Coupling modulation from input energy ──
+        # Normalized energy: ~1.0 for typical input, >1 for strong
+        energy = x.norm() / (in_dim ** 0.5 + 1e-8)
+        coupling_scale = self.coupling_mod_lo + (
+            self.coupling_mod_hi - self.coupling_mod_lo
+        ) * torch.sigmoid(energy - 1.0)
+
+        return {
+            'freq_modulation': freq_mod,
+            'reset_strength': reset_strength,
+            'phase_targets': phase_targets,
+            'coupling_scale': coupling_scale,
+            'input_novelty': novelty.item(),
+        }
 
 
 class StuartLandauOscillator(nn.Module):

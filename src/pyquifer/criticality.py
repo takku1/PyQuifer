@@ -20,6 +20,32 @@ from typing import Optional, Tuple, Dict, List
 from collections import deque
 
 
+def phase_activity_to_spikes(phases: torch.Tensor,
+                             threshold: float = 1.6) -> torch.Tensor:
+    """
+    Convert oscillator phases to spike-like activity for criticality measurement.
+
+    Uses y = 1 + sin(θ) with threshold detection, following the
+    excitatory/inhibitory Kuramoto model (Ferrara et al. 2024,
+    arXiv:2512.17317) where spikes are detected when y > threshold.
+
+    This produces binary avalanche-compatible events rather than
+    continuous sinusoidal values, which is necessary for meaningful
+    branching ratio and avalanche size measurements.
+
+    Args:
+        phases: Oscillator phases (any shape)
+        threshold: Spike threshold on 1+sin(θ). Default 1.6 matches
+                  the experimental convention (range of y is [0, 2]).
+
+    Returns:
+        Spike counts: number of oscillators that fired (scalar tensor)
+    """
+    y = 1.0 + torch.sin(phases)
+    spikes = (y > threshold).float()
+    return spikes.sum()
+
+
 class AvalancheDetector(nn.Module):
     """
     Detects and analyzes avalanches of activity in neural dynamics.
@@ -183,13 +209,15 @@ class BranchingRatio(nn.Module):
                    (legacy, can blow up on bursty subcritical data)
     """
 
-    def __init__(self, window_size: int = 50, variance_threshold: float = 1e-6,
+    def __init__(self, window_size: int = 50, variance_threshold: float = 1e-10,
                  estimator: str = 'ratio_of_means'):
         """
         Args:
             window_size: Number of time steps to average over
             variance_threshold: If activity variance falls below this, return
-                               sigma=1.0 with converged=True (quiescent regime)
+                               sigma=1.0 with converged=True (truly quiescent).
+                               Set very low (1e-10) so that only genuinely
+                               zero-variance signals trigger the shortcut.
             estimator: 'ratio_of_means' (default) or 'mean_of_ratios' (legacy)
         """
         super().__init__()
@@ -360,6 +388,130 @@ class NoProgressDetector(nn.Module):
         self.history.zero_()
         self.hist_ptr.zero_()
         self.stagnation_count.zero_()
+
+
+class KuramotoCriticalityMonitor(nn.Module):
+    """
+    Criticality monitor designed for Kuramoto oscillator networks.
+
+    Unlike BranchingRatio (designed for discrete spiking avalanches),
+    this measures criticality through the lens of synchronization
+    phase transitions, which is the correct framework for continuous
+    oscillator dynamics.
+
+    Key metrics:
+    - **Synchronization susceptibility** χ = N · var(R):
+      Peaks at the critical coupling K_c. This is the oscillator-network
+      analog of the diverging susceptibility at a phase transition
+      (Acebrón et al. 2005 Rev Mod Phys).
+
+    - **Order parameter regime**: R ∈ [0.3, 0.7] with high variance
+      indicates the critical band between incoherent (R≈0) and
+      fully synchronized (R≈1) regimes.
+
+    - **Criticality sigma**: Normalized to match BranchingRatio interface.
+      sigma < 1: subcritical (too incoherent, low R)
+      sigma ≈ 1: critical (medium R, high susceptibility)
+      sigma > 1: supercritical (too synchronized, R→1)
+
+    References:
+    - Acebrón et al. (2005) "The Kuramoto model" Rev Mod Phys
+    - Breakspear et al. (2010) "Generative Models of Cortical Oscillations"
+    - Ferrara et al. (2024) arXiv:2512.17317 (E/I Kuramoto avalanches)
+
+    Args:
+        window_size: Number of R samples to track
+        critical_R_low: Lower bound of critical R band (default 0.3)
+        critical_R_high: Upper bound of critical R band (default 0.7)
+    """
+
+    def __init__(self, window_size: int = 50,
+                 critical_R_low: float = 0.3,
+                 critical_R_high: float = 0.7):
+        super().__init__()
+        self.window_size = window_size
+        self.critical_R_low = critical_R_low
+        self.critical_R_high = critical_R_high
+
+        self.register_buffer('R_history', torch.zeros(window_size))
+        self.register_buffer('hist_ptr', torch.tensor(0))
+
+    def forward(self, R: torch.Tensor, num_oscillators: int = 1
+                ) -> Dict[str, torch.Tensor]:
+        """
+        Update with current order parameter R and compute criticality.
+
+        Args:
+            R: Current Kuramoto order parameter (scalar tensor)
+            num_oscillators: N, for susceptibility normalization
+
+        Returns:
+            Dict with:
+            - branching_ratio: sigma ∈ (0, 2) where 1.0 = critical
+            - criticality_distance: |sigma - 1.0|
+            - susceptibility: χ = N · var(R)
+            - R_mean: Mean R over window
+            - R_var: Variance of R over window
+        """
+        if R.numel() > 1:
+            R = R.mean()
+
+        dev = R.device
+
+        with torch.no_grad():
+            self.R_history[self.hist_ptr % self.window_size] = R.detach()
+            self.hist_ptr.add_(1)
+
+        n_valid = min(self.hist_ptr.item(), self.window_size)
+
+        if n_valid < 5:
+            return {
+                'branching_ratio': torch.tensor(1.0, device=dev),
+                'criticality_distance': torch.tensor(0.0, device=dev),
+                'susceptibility': torch.tensor(0.0, device=dev),
+                'R_mean': R.detach(),
+                'R_var': torch.tensor(0.0, device=dev),
+            }
+
+        history = self.R_history[:n_valid]
+        R_mean = history.mean()
+        R_var = history.var()
+        susceptibility = num_oscillators * R_var
+
+        # Compute sigma: map (R_mean, R_var) to a branching-ratio-like metric
+        # In the critical band [0.3, 0.7]: sigma ≈ 1.0
+        # Below 0.3 (subcritical/incoherent): sigma < 1.0
+        # Above 0.7 (supercritical/synchronized): sigma > 1.0
+        R_mid = (self.critical_R_low + self.critical_R_high) / 2.0
+        R_range = (self.critical_R_high - self.critical_R_low) / 2.0
+
+        # Deviation from critical band center, normalized
+        deviation = (R_mean - R_mid) / R_range  # -1 at low edge, +1 at high edge
+        # Map to sigma: center of band → 1.0. The 0.2 coefficient gives
+        # sigma ∈ [0.8, 1.2] at extremes, with band edges at ~0.85/1.15.
+        # This is deliberately flatter than branching-ratio (which uses 0.5)
+        # because the fast inhibitory path handles R overshoots directly —
+        # the sigma just needs to guide the slow homeostatic coupling.
+        sigma = 1.0 + 0.2 * torch.tanh(deviation)
+
+        # Bonus: high variance (susceptibility) pushes sigma toward 1.0
+        # because high var(R) is the hallmark of criticality
+        var_bonus = torch.clamp(R_var * 10.0, 0.0, 0.3)
+        sigma = sigma + var_bonus * (1.0 - sigma)  # pull toward 1.0
+
+        criticality_distance = torch.abs(sigma - 1.0)
+
+        return {
+            'branching_ratio': sigma,
+            'criticality_distance': criticality_distance,
+            'susceptibility': susceptibility,
+            'R_mean': R_mean,
+            'R_var': R_var,
+        }
+
+    def reset(self):
+        self.R_history.zero_()
+        self.hist_ptr.zero_()
 
 
 class CriticalityController(nn.Module):

@@ -57,6 +57,7 @@ __all__ = [
     "BranchingRatio",
     "CriticalityController",
     "HomeostaticRegulator",
+    "KuramotoCriticalityMonitor",
     # Learning
     "EligibilityTrace",
     "RewardModulatedHebbian",
@@ -287,6 +288,8 @@ __all__ = [
     "KuramotoDaidoMeanField",
     # Phase 5: Stuart-Landau Oscillator
     "StuartLandauOscillator",
+    # Sensory-Oscillator Coupling
+    "SensoryCoupling",
     # Phase 5: E-prop Dual Eligibility
     "EpropSTDP",
     # Phase 5: Differentiable Plasticity + Learnable Eligibility
@@ -384,6 +387,7 @@ _LAZY_IMPORTS = {
     "BranchingRatio": (".criticality", "BranchingRatio"),
     "CriticalityController": (".criticality", "CriticalityController"),
     "HomeostaticRegulator": (".criticality", "HomeostaticRegulator"),
+    "KuramotoCriticalityMonitor": (".criticality", "KuramotoCriticalityMonitor"),
 
     # Learning
     "EligibilityTrace": (".learning", "EligibilityTrace"),
@@ -652,6 +656,9 @@ _LAZY_IMPORTS = {
 
     # Phase 5: Stuart-Landau Oscillator
     "StuartLandauOscillator": (".oscillators", "StuartLandauOscillator"),
+
+    # Sensory-Oscillator Coupling
+    "SensoryCoupling": (".oscillators", "SensoryCoupling"),
 
     # Phase 5: E-prop Dual Eligibility
     "EpropSTDP": (".advanced_spiking", "EpropSTDP"),

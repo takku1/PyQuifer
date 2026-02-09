@@ -114,12 +114,16 @@ class PyQuiferBridge(nn.Module):
         self.cycle = CognitiveCycle(self.config)
 
         # Trait vectors for hidden state modulation (Level 3)
-        # Each facet gets a direction in embedding space
+        # Each facet gets a unit-norm direction in embedding space.
+        # With coherence~0.5 and gain~1.0, perturbation is ~2-5% of
+        # hidden state norm (visible in generation but not destructive).
         # These are learnable IF you want to train the bridge, but
         # gradient does NOT flow back to oscillators.
-        self.trait_vectors = nn.Parameter(
-            torch.randn(self.config.num_populations, self.config.state_dim) * 0.01
-        )
+        _raw_traits = torch.randn(self.config.num_populations, self.config.state_dim)
+        _raw_traits = _raw_traits / _raw_traits.norm(dim=-1, keepdim=True)
+        self.trait_vectors = nn.Parameter(_raw_traits)
+        # Learnable modulation gain (allows fine-tuning perturbation strength)
+        self.modulation_gain = nn.Parameter(torch.tensor(1.0))
 
         # Latency tracking
         self.register_buffer('_latency_ema', torch.tensor(0.0))
@@ -219,8 +223,9 @@ class PyQuiferBridge(nn.Module):
         """
         Level 2: Modify logits based on cognitive state.
 
-        Applies personality-weighted biasing to token probabilities.
-        Does NOT modify the model weights or hidden states.
+        Applies temperature scaling, coherence-based sharpening, and
+        motivation-based diversity. These produce visible changes in
+        token distribution (1-10% logit shifts).
 
         Args:
             logits: Raw logits from LLM (batch, vocab_size)
@@ -229,15 +234,24 @@ class PyQuiferBridge(nn.Module):
         Returns:
             Modified logits (same shape)
         """
-        # Temperature is typically applied by the generation framework,
-        # but if the user wants us to handle it:
+        # Temperature scaling (standard)
         modified = logits / max(state.temperature, 0.01)
 
-        # Motivation boost: higher motivation = slightly more diverse sampling
-        # (push logits closer together to flatten distribution)
-        if state.motivation > 1.0:
-            flatten_factor = 1.0 + (state.motivation - 1.0) * 0.1
-            modified = modified / flatten_factor
+        # Coherence sharpening: high coherence (focused) → sharpen distribution
+        # by scaling logits away from mean. Low coherence → flatten.
+        # Effect: 5-15% change at extreme coherence values.
+        if state.coherence > 0.1:
+            logit_mean = modified.mean(dim=-1, keepdim=True)
+            # coherence 0.5 → scale 1.0 (neutral), 0.8 → 1.06, 0.2 → 0.94
+            sharpening = 1.0 + (state.coherence - 0.5) * 0.2
+            modified = logit_mean + (modified - logit_mean) * sharpening
+
+        # Motivation diversity: higher motivation → more exploratory
+        # (flatten the distribution slightly to increase sampling entropy)
+        if state.motivation > 0.3:
+            flatten_factor = 1.0 + (state.motivation - 0.3) * 0.15
+            logit_mean = modified.mean(dim=-1, keepdim=True)
+            modified = logit_mean + (modified - logit_mean) / flatten_factor
 
         return modified
 
@@ -273,40 +287,49 @@ class PyQuiferBridge(nn.Module):
         batch, seq_len, hidden_dim = hidden_states.shape
         device = hidden_states.device
 
-        # Amplitude: coherence * mean neuromodulator gain
-        # Detached — oscillator state is read-only
+        # Amplitude: coherence * neuromodulator gain * learnable gain
+        # Detached — oscillator state is read-only from LLM's perspective
         coherence = state.coherence
         if state.neuromodulator_levels is not None:
             nm_gain = state.neuromodulator_levels.mean()
         else:
             nm_gain = torch.tensor(0.5, device=device)
-        amplitude = coherence * nm_gain * 0.1  # Scale factor to keep perturbation small
+        amplitude = coherence * nm_gain * self.modulation_gain
 
-        # Phase contribution: sin(phases) as a modulation signal
+        # Phase contribution: sin(phases) gives per-oscillator modulation
+        # Instead of averaging (which cancels to ~0), tile phases across
+        # hidden_dim so different dimensions get different phase signals.
+        # This is the key coupling equation from the design doc:
+        #   Modified = Original + A * sin(wt + phi) * Trait_Vector
         phases = state.phases.detach().to(device)
         phase_signal = torch.sin(phases)  # (num_oscillators,)
 
+        # Tile phase signal to match hidden_dim
+        num_osc = phase_signal.shape[0]
+        if num_osc < hidden_dim:
+            repeats = hidden_dim // num_osc + 1
+            phase_tiled = phase_signal.repeat(repeats)[:hidden_dim]
+        else:
+            phase_tiled = phase_signal[:hidden_dim]
+
         # Weighted trait vector: blend personality facets by their weights
         weights = torch.tensor(state.facet_weights, device=device, dtype=torch.float32)
-        # trait_vectors: (num_populations, state_dim)
         trait_vecs = self.trait_vectors.to(device)
         blended_trait = (weights.unsqueeze(-1) * trait_vecs).sum(dim=0)  # (state_dim,)
 
         # Project trait vector to hidden_dim if needed
         if blended_trait.shape[0] != hidden_dim:
-            # Simple repeat/truncate to match hidden_dim
             if blended_trait.shape[0] < hidden_dim:
                 repeats = hidden_dim // blended_trait.shape[0] + 1
                 blended_trait = blended_trait.repeat(repeats)[:hidden_dim]
             else:
                 blended_trait = blended_trait[:hidden_dim]
 
-        # Average phase signal to scalar modulation (stays on-device)
-        phase_mod = phase_signal.mean()
-
-        # The coupling equation:
-        # Modified = Original + amplitude * sin(mean_phase) * trait_vector
-        perturbation = amplitude * phase_mod * blended_trait
+        # The coupling equation (per-dimension phase modulation):
+        #   perturbation_d = A * sin(phase_d) * trait_d
+        # This gives structured perturbation where each hidden dimension
+        # is modulated by a different oscillator's phase.
+        perturbation = amplitude * phase_tiled * blended_trait
         modified = hidden_states + perturbation.unsqueeze(0).unsqueeze(0)
 
         return modified
