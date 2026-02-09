@@ -435,6 +435,8 @@ class KuramotoCriticalityMonitor(nn.Module):
 
         self.register_buffer('R_history', torch.zeros(window_size))
         self.register_buffer('hist_ptr', torch.tensor(0))
+        # Python-side counter for fast modular checks without GPU sync
+        self._hist_ptr_py: int = 0
 
     def forward(self, R: torch.Tensor, num_oscillators: int = 1
                 ) -> Dict[str, torch.Tensor]:
@@ -459,10 +461,12 @@ class KuramotoCriticalityMonitor(nn.Module):
         dev = R.device
 
         with torch.no_grad():
-            self.R_history[self.hist_ptr % self.window_size] = R.detach()
-            self.hist_ptr.add_(1)
+            idx = self._hist_ptr_py % self.window_size
+            self.R_history[idx] = R.detach()
+            self.hist_ptr.fill_(self._hist_ptr_py + 1)
+            self._hist_ptr_py += 1
 
-        n_valid = min(self.hist_ptr.item(), self.window_size)
+        n_valid = min(self._hist_ptr_py, self.window_size)
 
         if n_valid < 5:
             return {
@@ -512,6 +516,7 @@ class KuramotoCriticalityMonitor(nn.Module):
     def reset(self):
         self.R_history.zero_()
         self.hist_ptr.zero_()
+        self._hist_ptr_py = 0
 
 
 class CriticalityController(nn.Module):

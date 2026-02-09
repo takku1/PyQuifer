@@ -408,48 +408,63 @@ class SymbiogenesisDetector(nn.Module):
         # Symbiotic bond matrix (boolean-like)
         self.register_buffer('bonds', torch.zeros(num_groups, num_groups))
 
-    def _estimate_mi(self, x: torch.Tensor, y: torch.Tensor) -> float:
+    def _estimate_mi_all_pairs(self, n_valid: int) -> torch.Tensor:
         """
-        Estimate mutual information between two series using correlation.
+        Estimate mutual information between all group pairs at once.
 
-        MI ≈ -0.5 * log(1 - r^2) for Gaussian variables.
-
-        Args:
-            x: First series (T, D)
-            y: Second series (T, D)
+        Uses vectorized correlation: MI ≈ -0.5 * log(1 - r^2) for Gaussian.
 
         Returns:
-            Estimated MI (non-negative)
+            mi_matrix: (num_groups, num_groups) symmetric MI matrix
         """
-        if x.shape[0] < 10:
-            return 0.0
+        mi_matrix = torch.zeros(self.num_groups, self.num_groups,
+                                device=self.bonds.device)
+        if n_valid < 10:
+            return mi_matrix
 
-        # Flatten to 1D for correlation
-        x_flat = x.reshape(x.shape[0], -1)
-        y_flat = y.reshape(y.shape[0], -1)
+        # history[:n_valid] is (T, G, D)
+        data = self.history[:n_valid]  # (T, G, D)
+        T, G, D = data.shape
 
-        # Mean-center
-        x_c = x_flat - x_flat.mean(dim=0, keepdim=True)
-        y_c = y_flat - y_flat.mean(dim=0, keepdim=True)
+        # Mean-center each group's time series
+        data_c = data - data.mean(dim=0, keepdim=True)  # (T, G, D)
+        # Std per group per dim
+        data_std = data_c.std(dim=0) + 1e-8  # (G, D)
 
-        # Average correlation across dimensions
-        x_std = x_c.std(dim=0) + 1e-8
-        y_std = y_c.std(dim=0) + 1e-8
+        # For each pair (i, j), we need:
+        #   r = mean over D of: (mean over T of data_c[:,i,:] * data_c[:,j,:]) / (std_i * std_j)
+        # Vectorize: compute cross-correlation matrix (G, G, D) then average over D
+        # cross_corr[i,j,d] = mean_t(data_c[t,i,d] * data_c[t,j,d])
+        # = (data_c[:,:,:].T @ data_c[:,:,:]) / T  but need einsum for the grouping
 
-        correlations = (x_c * y_c).mean(dim=0) / (x_std * y_std)
-        r_squared = correlations.mean().item() ** 2
-        r_squared = min(r_squared, 0.999)  # Prevent log(0)
+        # Reshape to (T, G*D) then compute outer products? No, use einsum:
+        # cross_cov[i,j,d] = sum_t data_c[t,i,d] * data_c[t,j,d] / T
+        cross_cov = torch.einsum('tid,tjd->ijd', data_c, data_c) / T  # (G, G, D)
 
-        mi = -0.5 * math.log(1 - r_squared)
-        return max(0.0, mi)
+        # Normalize by stds
+        # norm[i,j,d] = cross_cov[i,j,d] / (std[i,d] * std[j,d])
+        std_outer = data_std.unsqueeze(1) * data_std.unsqueeze(0)  # (G, G, D)
+        correlations = cross_cov / std_outer  # (G, G, D)
+
+        # Mean correlation across dimensions, then MI
+        mean_corr = correlations.mean(dim=-1)  # (G, G)
+        r_squared = mean_corr.pow(2).clamp(max=0.999)
+        mi_matrix = (-0.5 * torch.log(1 - r_squared)).clamp(min=0.0)
+
+        # Zero the diagonal
+        mi_matrix.fill_diagonal_(0.0)
+
+        return mi_matrix
 
     def forward(self,
-                group_outputs: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
+                group_outputs: List[torch.Tensor],
+                compute_every: int = 10) -> Dict[str, torch.Tensor]:
         """
         Record group outputs and detect symbiogenesis.
 
         Args:
             group_outputs: List of group output tensors
+            compute_every: Only recompute MI every N calls (default 10)
 
         Returns:
             Dictionary with:
@@ -469,26 +484,30 @@ class SymbiogenesisDetector(nn.Module):
 
         n_valid = min(self.hist_ptr.item(), self.buffer_size)
 
-        # Compute pairwise MI
-        mi_matrix = torch.zeros(self.num_groups, self.num_groups,
-                                device=self.bonds.device)
-        if n_valid >= 20:
-            for i in range(self.num_groups):
-                for j in range(i + 1, self.num_groups):
-                    mi = self._estimate_mi(
-                        self.history[:n_valid, i],
-                        self.history[:n_valid, j]
-                    )
-                    mi_matrix[i, j] = mi
-                    mi_matrix[j, i] = mi
+        # Only recompute MI every compute_every calls
+        should_compute = (self.hist_ptr.item() % compute_every == 0) and n_valid >= 20
 
-        # Detect bonds
-        with torch.no_grad():
-            new_bonds = (mi_matrix > self.mi_threshold).float()
-            # Bonds are sticky: once formed, harder to break
-            self.bonds.copy_(torch.max(self.bonds * 0.99, new_bonds))
+        if should_compute:
+            # Vectorized pairwise MI computation
+            mi_matrix = self._estimate_mi_all_pairs(n_valid)
 
-        num_bonds = (self.bonds > 0.5).sum().item() // 2  # Each bond counted twice
+            # Cache for non-compute ticks
+            if not hasattr(self, '_cached_mi'):
+                self.register_buffer('_cached_mi',
+                    torch.zeros(self.num_groups, self.num_groups,
+                                device=self.bonds.device))
+            self._cached_mi.copy_(mi_matrix)
+
+            # Detect bonds
+            with torch.no_grad():
+                new_bonds = (mi_matrix > self.mi_threshold).float()
+                self.bonds.copy_(torch.max(self.bonds * 0.99, new_bonds))
+        else:
+            mi_matrix = getattr(self, '_cached_mi',
+                torch.zeros(self.num_groups, self.num_groups,
+                            device=self.bonds.device))
+
+        num_bonds = (self.bonds > 0.5).sum().item() // 2
 
         return {
             'bonds': self.bonds.clone(),

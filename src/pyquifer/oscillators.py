@@ -631,7 +631,7 @@ class SensoryCoupling(nn.Module):
             'reset_strength': reset_strength,
             'phase_targets': phase_targets,
             'coupling_scale': coupling_scale,
-            'input_novelty': novelty.item(),
+            'input_novelty': novelty,
         }
 
 

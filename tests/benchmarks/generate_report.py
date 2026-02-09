@@ -12,7 +12,7 @@ Categories (from COMPREHENSIVE_BENCHMARK_PLAN):
   Cat 5: Consciousness — PCI, metastability, coherence-complexity
   Cat 6: Efficiency — dtype, compile, scaling (overlap with Cat 2)
   Cat 7: Robustness — Noise tolerance, perturbation recovery
-  Cat 8: AKOrN — (future, placeholder)
+  Cat 8: LLM Evaluation — lm-evaluation-harness, OpenCompass, HELM, etc.
 
 Usage:
   python tests/benchmarks/generate_report.py
@@ -64,6 +64,23 @@ FILE_TO_CATEGORY = {
     "efficiency": "Cat 6: Efficiency",
     # Cat 7: Robustness
     "robustness": "Cat 7: Robustness",
+    # Cat 8: LLM Evaluation (lm-evaluation-harness)
+    "lm_eval": "Cat 8: LLM Evaluation",
+    "opencompass": "Cat 8: LLM Evaluation",
+    "helm": "Cat 8: LLM Evaluation",
+    "openai_evals": "Cat 8: LLM Evaluation",
+    "bigcode_eval": "Cat 8: LLM Evaluation",
+    "swe_bench": "Cat 8: LLM Evaluation",
+    # Cat 9: Safety
+    "harmbench": "Cat 9: Safety",
+    "jailbreakbench": "Cat 9: Safety",
+    "toxigen": "Cat 9: Safety",
+    # Cat 10: Factuality
+    "factscore": "Cat 10: Factuality",
+    "factbench": "Cat 10: Factuality",
+    "factreasoner": "Cat 10: Factuality",
+    # Cat 11: Real-Time Latency
+    "realtime": "Cat 11: Real-Time Latency",
 }
 
 # Ordered list for report sections
@@ -75,6 +92,10 @@ CATEGORY_ORDER = [
     "Cat 5: Consciousness",
     "Cat 6: Efficiency",
     "Cat 7: Robustness",
+    "Cat 8: LLM Evaluation",
+    "Cat 9: Safety",
+    "Cat 10: Factuality",
+    "Cat 11: Real-Time Latency",
 ]
 
 
@@ -123,6 +144,15 @@ def enhanced_report(results_dir: str, output_path: str) -> str:
             with open(jf) as f:
                 data = json.load(f)
             suite_name = data.get("suite", jf.stem)
+            suite_meta = data.get("metadata", {})
+
+            # Skip entire suite if suite-level metadata marks it stub/dummy/proxy
+            if suite_meta.get("is_stub") or suite_meta.get("is_dummy") or suite_meta.get("is_proxy"):
+                label = "proxy" if suite_meta.get("is_proxy") else "stub"
+                lines.append(f"\n### {suite_name} *({label} — excluded from scoring)*\n")
+                lines.append(f"Status: {suite_meta.get('status', label)}\n")
+                continue
+
             lines.append(f"\n### {suite_name}\n")
 
             for scenario in data.get("scenarios", []):
@@ -132,39 +162,114 @@ def enhanced_report(results_dir: str, output_path: str) -> str:
                 lines.append(mc.to_markdown_table())
                 lines.append("")
 
-                # Extract accuracy metrics for scoring
+                # Skip scoring for stub/dummy results — they have
+                # synthetic random values that would pollute aggregates.
+                _has_real_data = False
+                for r in mc.results:
+                    if r.column in ("B_pytorch", "C_pyquifer"):
+                        meta = r.metadata or {}
+                        if (not meta.get("stub") and not meta.get("dummy")
+                                and not meta.get("proxy")):
+                            _has_real_data = True
+                            break
+                if not _has_real_data:
+                    lines.append("*Stub/dummy/proxy results — excluded from scoring*\n")
+                    continue
+
+                # Extract quality + performance metrics for scoring.
+                # "Quality" is the primary metric (accuracy, pci, recovery_ratio,
+                # cosine_similarity, etc.) that plays the role of accuracy in the
+                # weighted scoring formula.
+                # Priority order for quality metric extraction:
+                _QUALITY_KEYS = [
+                    "accuracy", "avg_accuracy",
+                    # consciousness
+                    "pci_mean", "R_mean", "metastability_index",
+                    # robustness
+                    "recovery_ratio", "cosine_similarity", "variation_ratio",
+                    # efficiency / throughput (normalised to [0,1] below)
+                    "steps_per_sec", "ticks_per_sec", "samples_per_sec",
+                    # LLM
+                    "top1_agreement", "logit_entropy",
+                ]
+
                 acc_c, acc_b = None, None
                 speed_b, speed_c = None, None
                 lat_b, lat_c = None, None
                 mem_b, mem_c = None, None
+                quality_key_used = None
 
+                # First pass: find quality metric from C_pyquifer
+                for r in mc.results:
+                    if r.column == "C_pyquifer" and acc_c is None:
+                        for qk in _QUALITY_KEYS:
+                            if qk in r.metrics:
+                                acc_c = r.metrics[qk]
+                                quality_key_used = qk
+                                break
+
+                # Second pass: extract B_pytorch quality (matching key) + perf
                 for r in mc.results:
                     if r.column == "C_pyquifer":
-                        if "accuracy" in r.metrics:
-                            acc_c = r.metrics["accuracy"]
-                        elif "avg_accuracy" in r.metrics:
-                            acc_c = r.metrics["avg_accuracy"]
                         for k, v in r.metrics.items():
                             if "steps_per_sec" in k and speed_c is None:
+                                speed_c = v
+                            elif "ticks_per_sec" in k and speed_c is None:
                                 speed_c = v
                             if "p50_ms" in k and lat_c is None:
                                 lat_c = v
                             if "peak_memory" in k and mem_c is None:
                                 mem_c = v
                     elif r.column == "B_pytorch":
-                        if "accuracy" in r.metrics:
-                            acc_b = r.metrics["accuracy"]
-                        elif "avg_accuracy" in r.metrics:
-                            acc_b = r.metrics["avg_accuracy"]
+                        # Match the SAME quality key used for C_pyquifer
+                        if acc_b is None and quality_key_used and quality_key_used in r.metrics:
+                            acc_b = r.metrics[quality_key_used]
+                        # Fallback: only if C didn't identify a quality key
+                        # (avoids comparing mismatched metrics like R_mean vs ticks_per_sec)
+                        if acc_b is None and quality_key_used is None:
+                            for qk in _QUALITY_KEYS:
+                                if qk in r.metrics:
+                                    acc_b = r.metrics[qk]
+                                    break
                         for k, v in r.metrics.items():
                             if "steps_per_sec" in k and speed_b is None:
+                                speed_b = v
+                            elif "ticks_per_sec" in k and speed_b is None:
                                 speed_b = v
                             if "p50_ms" in k and lat_b is None:
                                 lat_b = v
                             if "peak_memory" in k and mem_b is None:
                                 mem_b = v
 
-                # Compute weighted score if we have accuracy
+                # Metrics where LOWER is better — invert for scoring
+                _LOWER_IS_BETTER = {"variation_ratio"}
+                if quality_key_used in _LOWER_IS_BETTER:
+                    # Convert: score = 1 / (1 + value)  so lower value → higher score
+                    if acc_c is not None:
+                        acc_c = 1.0 / (1.0 + acc_c)
+                    if acc_b is not None:
+                        acc_b = 1.0 / (1.0 + acc_b)
+
+                # For throughput metrics, normalise to [0,1] by computing
+                # C/max(B,C) so the scoring formula can treat them like accuracy.
+                if quality_key_used in ("steps_per_sec", "ticks_per_sec",
+                                        "samples_per_sec"):
+                    if acc_c is not None and acc_b is not None and acc_b > 0:
+                        denom = max(acc_b, acc_c, 1e-6)
+                        acc_c = acc_c / denom
+                        acc_b = acc_b / denom
+                    elif acc_c is not None:
+                        acc_c = 1.0  # Solo throughput, treat as passing
+
+                # logit_entropy: normalise to [0,1] by dividing by
+                # log2(vocab_size) ≈ 15 for 32k vocab
+                if quality_key_used == "logit_entropy":
+                    if acc_c is not None:
+                        acc_c = min(acc_c / 15.0, 1.0)
+                    if acc_b is not None:
+                        acc_b = min(acc_b / 15.0, 1.0)
+
+                # Compute weighted score if we have a quality metric
                 if acc_c is not None and acc_c > 0:
                     speed_ratio = (speed_c / speed_b) if speed_b and speed_c else 1.0
                     lat_ratio = (lat_b / lat_c) if lat_b and lat_c and lat_c > 0 else 1.0
@@ -181,6 +286,7 @@ def enhanced_report(results_dir: str, output_path: str) -> str:
                         "score": round(score, 4),
                         "accuracy_c": acc_c,
                         "accuracy_b": acc_b,
+                        "quality_metric": quality_key_used,
                     })
 
                 # Cohen's d from CI metadata (multi-seed)
@@ -214,14 +320,15 @@ def enhanced_report(results_dir: str, output_path: str) -> str:
 
         # Overall table
         lines.append("\n### All Scenarios\n")
-        lines.append("| Category | Scenario | Score | Accuracy (C) | Accuracy (B) |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("| Category | Scenario | Score | Quality (C) | Quality (B) | Metric |")
+        lines.append("|---|---|---|---|---|---|")
         total_score = 0.0
         for s in scenario_scores:
             acc_b_str = f"{s['accuracy_b']:.4f}" if s["accuracy_b"] else "--"
+            qm = s.get("quality_metric", "accuracy")
             lines.append(
                 f"| {s['category']} | {s['scenario']} | {s['score']:.4f} "
-                f"| {s['accuracy_c']:.4f} | {acc_b_str} |"
+                f"| {s['accuracy_c']:.4f} | {acc_b_str} | {qm} |"
             )
             total_score += s["score"]
 
@@ -283,6 +390,11 @@ def main():
         print("  python tests/benchmarks/bench_efficiency.py")
         print("  python tests/benchmarks/bench_robustness.py")
         print("  python tests/benchmarks/bench_llm_ab.py")
+        print("  python tests/benchmarks/bench_lm_eval.py")
+        print("  python tests/benchmarks/bench_harmbench.py")
+        print("  python tests/benchmarks/bench_toxigen.py")
+        print("  python tests/benchmarks/bench_factscore.py")
+        print("  python tests/benchmarks/bench_realtime.py")
         return
 
     print(f"Found {len(json_files)} result files:")

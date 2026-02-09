@@ -77,7 +77,8 @@ class PredictiveLevel(nn.Module):
 
         # Beliefs (current best estimate of causes)
         self.register_buffer('beliefs', torch.zeros(belief_dim))
-        self.register_buffer('_call_count', torch.tensor(0, dtype=torch.long))
+        # Python int counter avoids .item() GPU sync on every forward call
+        self._call_count_py: int = 0
 
         # Generative model: beliefs → predicted input from below
         self.generative = nn.Sequential(
@@ -121,38 +122,41 @@ class PredictiveLevel(nn.Module):
         if bottom_up_input.dim() == 1:
             bottom_up_input = bottom_up_input.unsqueeze(0)
 
-        # Generate prediction from current beliefs
-        # Clone to decouple autograd graph from in-place buffer updates
-        beliefs_snapshot = self.beliefs.clone()
-        beliefs_expanded = beliefs_snapshot.unsqueeze(0).expand(batch, -1)
-        prediction = self.generative(beliefs_expanded)
+        # === Inference pass ===
+        # When gen_lr > 0, the learning section below recomputes forwards from
+        # detached beliefs with fresh autograd graphs. The inference pass only
+        # needs values, not gradients, so we skip graph construction entirely.
+        # When gen_lr == 0 (external backprop mode), we need gradients to flow
+        # through prediction/error to the caller.
+        use_no_grad = self.gen_lr > 0
+        ctx = torch.no_grad() if use_no_grad else torch.enable_grad()
+        with ctx:
+            # Generate prediction from current beliefs
+            beliefs_for_pred = self.beliefs.clone() if not use_no_grad else self.beliefs
+            beliefs_expanded = beliefs_for_pred.unsqueeze(0).expand(batch, -1)
+            prediction = self.generative(beliefs_expanded)
 
-        # Prediction error
-        error = bottom_up_input - prediction
+            # Prediction error
+            error = bottom_up_input - prediction
 
-        # Use provided precision or internal estimate
-        prec = precision if precision is not None else self.precision
+            # Use provided precision or internal estimate
+            prec = precision if precision is not None else self.precision
 
-        # Precision-weighted error
-        weighted_error = prec * error
+            # Precision-weighted error
+            weighted_error = prec * error
 
-        # G-11: Update adaptive precision from prediction error variance (EMA)
+        # Buffer updates are always no_grad
         with torch.no_grad():
-            instant_var = error.detach().pow(2).mean(dim=0)  # per-channel variance
+            # G-11: Update adaptive precision from prediction error variance (EMA)
+            instant_var = error.detach().pow(2).mean(dim=0)
             self.error_variance.mul_(1 - self.precision_ema).add_(self.precision_ema * instant_var)
-            # Precision = inverse error variance (Fisher information, Millidge et al. 2021)
             self.precision.copy_((1.0 / (self.error_variance + 1e-6)).clamp(max=100.0))
 
-        # Update beliefs via recognition model (variational approximate posterior)
-        recognition_target = self.recognition(bottom_up_input).mean(dim=0)
+            # Update beliefs via recognition model (variational approximate posterior)
+            recognition_target = self.recognition(bottom_up_input.detach()).mean(dim=0)
 
-        with torch.no_grad():
             # G-11: Precision-weighted belief update (natural gradient)
-            # Scale belief error by precision projected through recognition Jacobian
             belief_error = recognition_target - self.beliefs
-            # Approximate precision weighting: use mean precision as scalar scaling
-            # Full Fisher requires Jacobian which is expensive; mean precision is
-            # an effective diagonal approximation
             precision_scale = prec.mean().clamp(min=0.1, max=10.0)
             self.beliefs.add_(self.lr * precision_scale * belief_error)
 
@@ -167,10 +171,9 @@ class PredictiveLevel(nn.Module):
         # over repeated exposure (not just belief convergence).
         # Uses .backward() instead of autograd.grad() for lower overhead,
         # and only runs every learn_every calls to amortize the cost.
-        with torch.no_grad():
-            self._call_count.add_(1)
+        self._call_count_py += 1
         should_learn = (self.gen_lr > 0
-                        and self._call_count.item() % self.learn_every == 0)
+                        and self._call_count_py % self.learn_every == 0)
 
         if should_learn:
             # Zero grads once for both models
@@ -224,7 +227,7 @@ class PredictiveLevel(nn.Module):
         self.beliefs.zero_()
         self.precision.fill_(1.0)
         self.error_variance.fill_(1.0)
-        self._call_count.zero_()
+        self._call_count_py = 0
 
 
 class HierarchicalPredictiveCoding(nn.Module):
@@ -260,6 +263,10 @@ class HierarchicalPredictiveCoding(nn.Module):
         super().__init__()
         self.num_levels = len(level_dims)
         self.num_iterations = num_iterations
+        # Early stopping: skip remaining iterations if total error drops
+        # below threshold. Implements amortized fast-path + iterative
+        # refinement only when prediction error is high.
+        self.early_stop_threshold = 0.01
 
         if self.num_levels < 2:
             raise ValueError("Need at least 2 levels for a hierarchy")
@@ -301,7 +308,7 @@ class HierarchicalPredictiveCoding(nn.Module):
         all_errors = []
         all_beliefs = []
 
-        # Iterative message passing
+        # Iterative message passing with early stopping
         for iteration in range(self.num_iterations):
             level_outputs = []
 
@@ -311,9 +318,10 @@ class HierarchicalPredictiveCoding(nn.Module):
                 prec = precisions[i] if precisions is not None else None
 
                 # Top-down prediction from level above (from previous iteration)
+                # NOTE: top-down message passing is currently disabled (bottom-up
+                # only). Enabling it requires tuning the top-down learning rate
+                # relative to generative model convergence to avoid instability.
                 td_pred = None
-                if i < self.num_levels - 1 and iteration > 0:
-                    td_pred = level_outputs_prev[i + 1]['prediction'] if hasattr(self, '_prev') else None
 
                 output = level(current_input, top_down_prediction=td_pred, precision=prec)
                 level_outputs.append(output)
@@ -321,8 +329,11 @@ class HierarchicalPredictiveCoding(nn.Module):
                 # Input to next level = beliefs from this level
                 current_input = output['beliefs'].unsqueeze(0).expand(sensory_input.shape[0], -1)
 
-            # Store for next iteration's top-down pass
-            level_outputs_prev = level_outputs
+            # Early stopping: if errors are small, skip remaining iterations
+            if iteration < self.num_iterations - 1 and self.early_stop_threshold > 0:
+                total_err = sum(o['error'].abs().mean() for o in level_outputs)
+                if total_err.item() < self.early_stop_threshold:
+                    break
 
         # Collect final state
         for output in level_outputs:

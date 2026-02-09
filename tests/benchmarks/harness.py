@@ -188,9 +188,10 @@ def _fmt(v) -> str:
 class BenchmarkSuite:
     """Aggregates multiple MetricCollectors into a single report."""
 
-    def __init__(self, suite_name: str):
+    def __init__(self, suite_name: str, metadata: Optional[Dict[str, Any]] = None):
         self.suite_name = suite_name
         self.collectors: List[MetricCollector] = []
+        self.metadata: Dict[str, Any] = metadata or {}
 
     def add(self, collector: MetricCollector):
         self.collectors.append(collector)
@@ -200,6 +201,8 @@ class BenchmarkSuite:
             "suite": self.suite_name,
             "scenarios": [c.to_dict() for c in self.collectors],
         }
+        if self.metadata:
+            data["metadata"] = self.metadata
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)

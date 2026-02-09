@@ -74,6 +74,32 @@ def bench_pci(num_ticks: int = 200, num_perturbations: int = 5,
     cycle = CognitiveCycle(cfg).to(device)
     sensory = torch.randn(cfg.state_dim, device=device) * 0.5
 
+    # Column A: Published baselines
+    mc.record("A_published", "pci_mean", 0.44,
+              {"source": "PCI*≈0.44-0.67 healthy awake, Casali et al. (2013) Sci. Transl. Med."})
+    mc.record("A_published", "pci_target_min", 0.31,
+              {"source": "PCI*>0.31 indicates conscious processing"})
+
+    # Column B: Random neural network (no oscillatory dynamics)
+    set_seed(42)
+    rand_net = torch.nn.Sequential(
+        torch.nn.Linear(cfg.num_oscillators, cfg.num_oscillators),
+        torch.nn.Tanh(),
+    ).to(device)
+    pci_b_values = []
+    for p_idx in range(num_perturbations):
+        set_seed(42 + p_idx)
+        state_b = torch.randn(cfg.num_oscillators, device=device)
+        perturbation_b = torch.randn_like(state_b) * perturbation_strength
+        state_b = state_b + perturbation_b
+        phase_b = []
+        for _ in range(num_ticks):
+            state_b = rand_net(state_b)
+            phase_b.append(state_b.clone())
+        binary_b = phase_to_binary(torch.stack(phase_b))
+        pci_b_values.append(lempel_ziv_complexity(binary_b))
+    mc.record("B_pytorch", "pci_mean", round(sum(pci_b_values) / len(pci_b_values), 4))
+
     # Run baseline to settle dynamics
     for _ in range(50):
         cycle.tick(sensory, reward=0.0)
@@ -158,6 +184,26 @@ def bench_metastability(num_ticks: int = 500) -> MetricCollector:
     cycle = CognitiveCycle(cfg).to(device)
     sensory = torch.randn(cfg.state_dim, device=device) * 0.5
 
+    # Column A: Published baselines
+    mc.record("A_published", "R_mean", 0.5,
+              {"source": "R_mean≈0.3-0.7 conscious state, Tognoli & Kelso (2014) Neuron"})
+    mc.record("A_published", "metastability_index", 0.03,
+              {"source": "var(R)≈0.01-0.05 conscious, Tognoli & Kelso (2014)"})
+
+    # Column B: Vanilla GRU (no oscillatory dynamics)
+    set_seed(42)
+    gru_cell = torch.nn.GRUCell(cfg.state_dim, cfg.state_dim).to(device)
+    h_b = torch.randn(1, cfg.state_dim, device=device)
+    R_b_values = []
+    for _ in range(num_ticks):
+        h_b = gru_cell(sensory.unsqueeze(0), h_b)
+        norm = h_b.norm().item()
+        R_b_values.append(norm / (cfg.state_dim ** 0.5))
+    R_b_arr = np.array(R_b_values)
+    mc.record("B_pytorch", "R_mean", round(float(R_b_arr.mean()), 4))
+    mc.record("B_pytorch", "R_std", round(float(R_b_arr.std()), 4))
+    mc.record("B_pytorch", "metastability_index", round(float(R_b_arr.var()), 6))
+
     R_values = []
     for t in range(num_ticks):
         cycle.tick(sensory, reward=0.0)
@@ -197,6 +243,37 @@ def bench_coherence_complexity(coupling_values: List[float] = None,
     mc = MetricCollector("Coherence-Complexity Sweep")
 
     from pyquifer.oscillators import LearnableKuramotoBank
+
+    # Column A: Published baselines
+    mc.record("A_published", "K=1.0_R_mean", 0.5,
+              {"source": "R≈0.5 at K≈K_c, Kuramoto (1984)"})
+    mc.record("A_published", "K=1.0_LZ", 0.8,
+              {"source": "Max LZ at K≈K_c, Tononi (2004) BMC Neurosci."})
+
+    # Column B: Fixed-coupling oscillator bank (no learning, no criticality control)
+    set_seed(42)
+    fixed_bank = LearnableKuramotoBank(
+        num_oscillators=32, dt=0.01, topology='global',
+    ).to(device)
+    with torch.no_grad():
+        fixed_bank.coupling_strength.fill_(1.0)
+    # Freeze all parameters to prevent any learning
+    for p in fixed_bank.parameters():
+        p.requires_grad_(False)
+    ext_b = torch.randn(32, device=device) * 0.1
+    R_b_vals = []
+    phases_b_all = []
+    for _ in range(num_ticks):
+        fixed_bank(external_input=ext_b, steps=1)
+        R_b = fixed_bank.get_order_parameter().item()
+        R_b_vals.append(R_b)
+        phases_b_all.append(fixed_bank.phases.clone())
+    R_b_arr = np.array(R_b_vals)
+    binary_b = phase_to_binary(torch.stack(phases_b_all))
+    lz_b = lempel_ziv_complexity(binary_b)
+    mc.record("B_pytorch", "K=1.0_R_mean", round(float(R_b_arr.mean()), 4))
+    mc.record("B_pytorch", "K=1.0_LZ", round(lz_b, 4))
+    mc.record("B_pytorch", "K=1.0_metastability", round(float(R_b_arr.var()), 6))
 
     for K in coupling_values:
         set_seed(42)

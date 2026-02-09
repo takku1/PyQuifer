@@ -30,8 +30,11 @@ References:
 import torch
 import torch.nn as nn
 import math
+import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +57,7 @@ class CycleConfig:
     hierarchy_dims: List[int] = field(default_factory=lambda: [64, 32, 16])
     hpc_lr: float = 0.05
     hpc_gen_lr: float = 0.01
+    hpc_iterations: int = 3          # Message-passing iterations in HPC (1=fast, 3=accurate)
 
     # Precision
     precision_tau: float = 20.0
@@ -132,6 +136,16 @@ class CycleConfig:
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
+    # Hierarchical timestepping: run slow modules less often than fast ones.
+    # Value = run every N ticks. 1 = every tick (default/legacy behavior).
+    step_every_hpc: int = 1           # Hierarchical predictive coding
+    step_every_sr: int = 1            # Stochastic resonance
+    step_every_motivation: int = 1    # IntrinsicMotivationSystem
+    step_every_metastability: int = 1 # WinnerlessCompetition
+    step_every_precision: int = 1     # Precision weighting
+    step_every_arena: int = 1         # Neural darwinism arena
+    step_every_selfmodel: int = 1     # Self-model + narrative
+
     @staticmethod
     def default():
         return CycleConfig()
@@ -148,6 +162,93 @@ class CycleConfig:
             volatility_base_lr=0.01, volatility_min_lr=0.001,
             volatility_max_lr=0.1,
         )
+
+    @staticmethod
+    def interactive():
+        """Config tuned for real-time streaming (<=2ms target).
+
+        Uses aggressive hierarchical timestepping: slow modules run
+        less often, with cached results interpolated between updates.
+        HPC runs with 1 iteration (bottom-up only) for speed.
+        """
+        return CycleConfig(
+            hpc_iterations=1,          # Bottom-up only (3x faster HPC)
+            step_every_hpc=2,          # HPC every 2 ticks
+            step_every_sr=3,           # SR every 3 ticks
+            step_every_motivation=5,   # Motivation every 5 ticks
+            step_every_metastability=3,# Metastability every 3 ticks
+            step_every_precision=2,    # Precision every 2 ticks
+            step_every_arena=3,        # Arena every 3 ticks
+            step_every_selfmodel=5,    # Self-model every 5 ticks
+        )
+
+    @staticmethod
+    def realtime():
+        """Config for absolute minimum latency (<1.5ms target).
+
+        Maximum hierarchical timestepping: HPC runs 1 iteration every
+        3 ticks. Motivation/self-model run very infrequently. Arena
+        and metastability heavily cached. The recognition model
+        provides amortized inference; iterative refinement only fires
+        when prediction error is high (early stopping in HPC).
+        """
+        return CycleConfig(
+            hpc_iterations=1,           # Single bottom-up sweep
+            step_every_hpc=3,           # HPC every 3 ticks
+            step_every_sr=5,            # SR every 5 ticks
+            step_every_motivation=8,    # Motivation every 8 ticks
+            step_every_metastability=5, # Metastability every 5 ticks
+            step_every_precision=3,     # Precision every 3 ticks
+            step_every_arena=5,         # Arena every 5 ticks
+            step_every_selfmodel=10,    # Self-model every 10 ticks
+        )
+
+
+def _criticality_feedback(
+    osc_phases: torch.Tensor,
+    osc_coupling_data: torch.Tensor,
+    crit_sigma: torch.Tensor,
+    R_current: torch.Tensor,
+) -> torch.Tensor:
+    """Pure-tensor criticality feedback loop (slow + fast paths).
+
+    Extracted from tick() so torch.compile can fuse the ~15 element-wise
+    ops into 1-2 kernels.  No .item() calls, no Python branching on
+    tensor values, no dict construction — fully traceable.
+
+    Args:
+        osc_phases: Oscillator phase buffer (num_oscillators,)
+        osc_coupling_data: coupling_strength.data (scalar tensor)
+        crit_sigma: Branching ratio σ from KuramotoCriticalityMonitor
+        R_current: Instantaneous order parameter R
+
+    Returns:
+        Updated phases tensor (with dephasing applied)
+    """
+    # ── SLOW PATH: Homeostatic coupling adjustment ──
+    sigma_error = crit_sigma - 1.0
+    abs_err = sigma_error.abs()
+    gain_super = 0.005 + 0.03 * sigma_error
+    gain_sub = 0.008 + 0.05 * abs_err
+    gain = torch.where(
+        abs_err < 0.15,
+        torch.zeros_like(sigma_error).fill_(0.0005),
+        torch.where(sigma_error > 0, gain_super, gain_sub),
+    )
+    coupling_delta = -sigma_error * gain
+    new_K = (osc_coupling_data + coupling_delta).clamp(min=0.1, max=5.0)
+    osc_coupling_data.copy_(new_K)
+
+    # ── FAST PATH: Inhibitory dephasing on instantaneous R ──
+    R_excess = (R_current - 0.52).clamp(min=0.0)
+    noise_scale = (R_excess * 1.5).clamp(max=0.8)
+    dephasing = torch.randn_like(osc_phases) * noise_scale
+    osc_phases.add_(dephasing).remainder_(2 * math.pi)
+    return osc_phases
+
+
+# Compiled version — created lazily by compile_modules()
+_compiled_criticality_feedback = None
 
 
 class CognitiveCycle(nn.Module):
@@ -173,8 +274,10 @@ class CognitiveCycle(nn.Module):
         self.config = config or CycleConfig.default()
         c = self.config
 
-        # Track tick count
+        # Track tick count (buffer for serialisation, Python int for
+        # fast modular checks without GPU sync)
         self.register_buffer('tick_count', torch.tensor(0))
+        self._tick_py: int = 0
 
         # === Layer 3: Dynamical Core ===
         from pyquifer.oscillators import LearnableKuramotoBank, SensoryCoupling
@@ -215,7 +318,8 @@ class CognitiveCycle(nn.Module):
             level_dims=c.hierarchy_dims,
             lr=c.hpc_lr,
             gen_lr=c.hpc_gen_lr,
-            learn_every=3,  # amortize autograd cost: learn every 3rd tick
+            learn_every=3,  # amortize autograd cost: learn every 3rd call
+            num_iterations=c.hpc_iterations,
         )
 
         from pyquifer.precision_weighting import AttentionAsPrecision
@@ -490,6 +594,19 @@ class CognitiveCycle(nn.Module):
         else:
             self.state_to_group = nn.Identity()
 
+        # === Hierarchical Timestepping Caches ===
+        # These store the last result from modules that don't run every tick.
+        # Initialized to None; populated on first run of each module.
+        self._cached_hpc: Optional[Dict] = None
+        self._cached_sr: Optional[Dict] = None
+        self._cached_motiv: Optional[Dict] = None
+        self._cached_meta: Optional[Dict] = None
+        self._cached_prec: Optional[Dict] = None
+        self._cached_arena: Optional[Dict] = None
+        self._cached_self: Optional[Dict] = None
+        self._cached_narr: Optional[Dict] = None
+        self._cached_blanket: Optional[Dict] = None
+
     def register_organ(self, organ, adapter=None):
         """
         Register a specialist organ for workspace competition.
@@ -646,7 +763,8 @@ class CognitiveCycle(nn.Module):
             use_precision=True,
         )
         order_param = self.oscillators.get_order_parameter()
-        coherence = order_param.item() if isinstance(order_param, torch.Tensor) else order_param
+        # Keep as tensor — .item() deferred to batch extraction block at end
+        coherence = order_param if isinstance(order_param, torch.Tensor) else torch.tensor(order_param, device=device)
 
         # ── Step 1b: Optional Stuart-Landau oscillator ──
         stuart_landau_info = {}
@@ -686,7 +804,8 @@ class CognitiveCycle(nn.Module):
         crit = self._kuramoto_criticality(
             R_current, num_oscillators=self.oscillators.num_oscillators,
         )
-        criticality_distance = crit['criticality_distance'].item()
+        # Keep as tensor — .item() deferred to batch extraction block
+        criticality_distance = crit['criticality_distance']
 
         # Also feed spike-based activity to the PI controller (for avalanche tracking)
         spike_count = self._phase_to_spikes(phases)
@@ -709,42 +828,20 @@ class CognitiveCycle(nn.Module):
         # phase-locked. The fast path catches this before it happens.
         # (Poil et al. 2012 J Neurosci — homeostatic criticality;
         #  Brunel & Wang 2003 J Comp Neurosci — E/I balance)
-        crit_sigma = crit['branching_ratio'].item()
-        R_instant = R_current.item() if isinstance(R_current, torch.Tensor) \
-            else float(R_current)
+        # Keep as tensor — .item() deferred to batch extraction block
+        crit_sigma = crit['branching_ratio']
 
         with torch.no_grad():
-            # ── SLOW PATH: Homeostatic coupling adjustment ──
-            sigma_error = crit_sigma - 1.0
-            abs_err = abs(sigma_error)
-            if abs_err < 0.15:
-                gain = 0.0005  # deadzone: near-critical, minimal nudge
-            elif sigma_error > 0:
-                gain = 0.005 + 0.03 * sigma_error
-            else:
-                gain = 0.008 + 0.05 * abs_err
-            coupling_delta = -sigma_error * gain
-            new_K = self.oscillators.coupling_strength.data + coupling_delta
-            self.oscillators.coupling_strength.data.copy_(
-                new_K.clamp(min=0.1, max=5.0)
+            # Criticality feedback: dual-timescale control extracted into a
+            # standalone function so torch.compile can fuse all ~15 element-wise
+            # ops into 1-2 kernels.  See _criticality_feedback() docstring.
+            _crit_fn = _compiled_criticality_feedback or _criticality_feedback
+            _crit_fn(
+                self.oscillators.phases,
+                self.oscillators.coupling_strength.data,
+                crit_sigma,
+                R_current,
             )
-
-            # ── FAST PATH: Inhibitory dephasing on instantaneous R ──
-            # Activates when R exceeds the critical center (R≈0.5).
-            # This keeps R in the 0.4-0.6 band where sigma≈1.0 (true
-            # critical point), rather than letting it reach 0.7+ where
-            # sigma reads "deeply supercritical" and the slow path
-            # over-corrects.
-            #
-            # Gentle near center, strong far above:
-            #   R=0.55 → 0.08rad (gentle nudge)
-            #   R=0.65 → 0.23rad (moderate)
-            #   R=0.80 → 0.45rad (strong desync)
-            R_excess = max(0.0, R_instant - 0.5)
-            if R_excess > 0.02:  # small deadzone around center
-                noise_scale = min(0.8, (R_excess - 0.02) * 1.5)
-                dephasing = torch.randn_like(self.oscillators.phases) * noise_scale
-                self.oscillators.phases.add_(dephasing).remainder_(2 * math.pi)
 
         # ── Step 2b: Optional Koopman bifurcation detection ──
         koopman_info = {}
@@ -763,15 +860,20 @@ class CognitiveCycle(nn.Module):
         )
 
         # Extract neuromodulator levels: [DA, 5HT, NE, ACh, Cortisol]
+        # Keep as 0-dim tensors — .item() deferred to batch extraction block
         levels = self.neuromodulation.levels
-        ach = levels[3].item()  # acetylcholine
-        ne = levels[2].item()   # norepinephrine
+        ach = levels[3]  # acetylcholine
+        ne = levels[2]   # norepinephrine
 
         # ── Step 4: Stochastic resonance ──
-        sr_result = self.stochastic_resonance(
-            sensory_input.squeeze(0) if was_1d else sensory_input[0],
-            criticality_distance=criticality_distance,
-        )
+        if self._tick_py % c.step_every_sr == 0 or self._cached_sr is None:
+            sr_result = self.stochastic_resonance(
+                sensory_input.squeeze(0) if was_1d else sensory_input[0],
+                criticality_distance=criticality_distance,
+            )
+            self._cached_sr = sr_result
+        else:
+            sr_result = self._cached_sr
         enhanced_input = sr_result['enhanced'].unsqueeze(0)
 
         # ── Step 4b: Optional short-term plasticity ──
@@ -822,7 +924,11 @@ class CognitiveCycle(nn.Module):
                 'alpha_beta_power': opc_result['alpha_beta_power'].item() if isinstance(opc_result['alpha_beta_power'], torch.Tensor) else opc_result['alpha_beta_power'],
             }
 
-        hpc_result = self.hpc(hpc_input)
+        if self._tick_py % c.step_every_hpc == 0 or self._cached_hpc is None:
+            hpc_result = self.hpc(hpc_input)
+            self._cached_hpc = hpc_result
+        else:
+            hpc_result = self._cached_hpc
         prediction_error = hpc_result['errors'][0]  # Bottom-level errors
         free_energy = hpc_result['free_energy']
         top_beliefs = hpc_result['top_level_beliefs']
@@ -836,12 +942,16 @@ class CognitiveCycle(nn.Module):
         adaptive_lr = vol_result['effective_lr']  # Per-dimension adaptive LR
 
         # ── Step 6: Precision weighting ──
-        prec_result = self.precision(
-            hpc_input,
-            prediction_error,
-            acetylcholine=ach,
-            norepinephrine=ne,
-        )
+        if self._tick_py % c.step_every_precision == 0 or self._cached_prec is None:
+            prec_result = self.precision(
+                hpc_input,
+                prediction_error,
+                acetylcholine=ach,
+                norepinephrine=ne,
+            )
+            self._cached_prec = prec_result
+        else:
+            prec_result = self._cached_prec
         attention_map = prec_result['attention_map']
 
         # ── Step 7: Causal flow (dominance detection) ──
@@ -866,14 +976,19 @@ class CognitiveCycle(nn.Module):
                     # Modulate: high band coherence amplifies that level's activation
                     level_activations[lvl] = level_activations[lvl] * (0.5 + band_r)
 
-        dom_result = self.dominance(level_activations, compute_every=10)
-        dominance_ratio = dom_result['dominance_ratio'].item()
+        dom_result = self.dominance(level_activations, compute_every=50)
+        dominance_ratio = dom_result['dominance_ratio']  # keep tensor
         processing_mode = dom_result['mode']
 
         # ── Step 8: Metastability (stream of consciousness) ──
-        meta_result = self.metastability()
-        dominant_state = meta_result['dominant'].item()
-        coalition_entropy = meta_result['coalition_entropy'].item()
+        if self._tick_py % c.step_every_metastability == 0 or self._cached_meta is None:
+            meta_result = self.metastability()
+            self._cached_meta = meta_result
+        else:
+            meta_result = self._cached_meta
+        # Keep as tensors — extract to int/float in batch block
+        dominant_state_t = meta_result['dominant']
+        coalition_entropy = meta_result['coalition_entropy']
 
         # ── Step 8a: Personality attractor (if enabled) ──
         personality_info = {}
@@ -976,44 +1091,60 @@ class CognitiveCycle(nn.Module):
             # Weight by ignition strength (0.2 blend factor)
             global_coherence_signal = global_coherence_signal + 0.2 * gw_proj
 
-        arena_result = self.arena(group_input, global_coherence=global_coherence_signal)
-        self.symbiogenesis(arena_result['group_outputs'])
+        if self._tick_py % c.step_every_arena == 0 or self._cached_arena is None:
+            arena_result = self.arena(group_input, global_coherence=global_coherence_signal)
+            self.symbiogenesis(arena_result['group_outputs'])
+            self._cached_arena = arena_result
+        else:
+            arena_result = self._cached_arena
 
         # ── Step 10: Motivation ──
-        motiv_result = self.motivation(
-            sensory_input[0],
-            order_parameter=torch.tensor(coherence, device=device),
-        )
-        combined_motivation = motiv_result['motivation'].item()
+        if self._tick_py % c.step_every_motivation == 0 or self._cached_motiv is None:
+            motiv_result = self.motivation(
+                sensory_input[0],
+                order_parameter=coherence.detach() if isinstance(coherence, torch.Tensor) else torch.tensor(coherence, device=device),
+            )
+            self._cached_motiv = motiv_result
+        else:
+            motiv_result = self._cached_motiv
+        combined_motivation = motiv_result['motivation']  # keep tensor
 
         # ── Step 11: Self-model ──
-        sensory_for_blanket = self.state_to_sensory(sensory_input[0])
-        blanket = self.markov_blanket(sensory_for_blanket)
-
-        # Somatic → Self-Model wiring: enrich internal state with body signals
         somatic_info = {}
-        internal_state = blanket['internal_state']
-        if self._somatic is not None:
-            som_result = self._somatic.forward()
-            som_state = som_result['state']  # SomaticState dataclass
-            stress_val = som_state.total_stress()
-            coupling_mod = som_result.get('coupling_modulation', None)
-            somatic_info = {
-                'somatic_stress': stress_val,
-                'somatic_pain': som_state.pain,
-                'somatic_fatigue': som_state.fatigue,
-                'should_repair': som_result.get('should_repair', False),
-            }
-            # Modulate internal state: high stress → dampen self-model updates
-            stress_gate = max(0.3, 1.0 - stress_val * 0.5)  # [0.3, 1.0]
-            internal_state = internal_state * stress_gate
-            # Somatic coupling modulation → oscillator coupling
-            if coupling_mod is not None and coupling_mod.shape[0] == c.num_oscillators:
-                with torch.no_grad():
-                    self.oscillators.coupling_strength.mul_(0.9).add_(0.1 * coupling_mod.mean())
+        if self._tick_py % c.step_every_selfmodel == 0 or self._cached_self is None:
+            sensory_for_blanket = self.state_to_sensory(sensory_input[0])
+            blanket = self.markov_blanket(sensory_for_blanket)
 
-        self_result = self.self_model(internal_state)
-        narr_result = self.narrative(self_result['self_summary'])
+            # Somatic → Self-Model wiring: enrich internal state with body signals
+            internal_state = blanket['internal_state']
+            if self._somatic is not None:
+                som_result = self._somatic.forward()
+                som_state = som_result['state']  # SomaticState dataclass
+                stress_val = som_state.total_stress()
+                coupling_mod = som_result.get('coupling_modulation', None)
+                somatic_info = {
+                    'somatic_stress': stress_val,
+                    'somatic_pain': som_state.pain,
+                    'somatic_fatigue': som_state.fatigue,
+                    'should_repair': som_result.get('should_repair', False),
+                }
+                # Modulate internal state: high stress → dampen self-model updates
+                stress_gate = max(0.3, 1.0 - stress_val * 0.5)  # [0.3, 1.0]
+                internal_state = internal_state * stress_gate
+                # Somatic coupling modulation → oscillator coupling
+                if coupling_mod is not None and coupling_mod.shape[0] == c.num_oscillators:
+                    with torch.no_grad():
+                        self.oscillators.coupling_strength.mul_(0.9).add_(0.1 * coupling_mod.mean())
+
+            self_result = self.self_model(internal_state)
+            narr_result = self.narrative(self_result['self_summary'])
+            self._cached_self = self_result
+            self._cached_narr = narr_result
+            self._cached_blanket = blanket
+        else:
+            self_result = self._cached_self
+            narr_result = self._cached_narr
+            blanket = self._cached_blanket
 
         # ── Step 11b: Three-factor learning ──
         three_factor_info = {}
@@ -1083,7 +1214,7 @@ class CognitiveCycle(nn.Module):
 
         # EP training (periodically, not every tick)
         ep_info = {}
-        if self._ep_trainer is not None and self.tick_count.item() % 10 == 0:
+        if self._ep_trainer is not None and self._tick_py % 10 == 0:
             # Use sensory input as external driving force (projected to oscillator dim)
             ext = self.phase_to_state.weight.T @ sensory_input[0].detach()
             # Simple loss: maximize order parameter
@@ -1105,7 +1236,7 @@ class CognitiveCycle(nn.Module):
             phase7_info['stagnation_duration'] = np_result['stagnation_duration'].item() if isinstance(np_result['stagnation_duration'], torch.Tensor) else np_result['stagnation_duration']
             phase7_info['trend'] = np_result['trend'].item() if isinstance(np_result['trend'], torch.Tensor) else np_result['trend']
 
-        if self.config.use_attractor_stability and self.tick_count.item() % 50 == 0:
+        if self.config.use_attractor_stability and self._tick_py % 50 == 0:
             asi = self.oscillators.compute_attractor_stability(n_trials=5, recovery_steps=10)
             phase7_info['attractor_stability'] = asi['stability_index'].item()
             phase7_info['escape_probability'] = asi['escape_probability'].item()
@@ -1122,6 +1253,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 13: Tick counter ──
         with torch.no_grad():
             self.tick_count.add_(1)
+        self._tick_py += 1
 
         # ── Compute LLM modulation parameters ──
         # This is the critical output — what actually modulates the language model
@@ -1135,12 +1267,46 @@ class CognitiveCycle(nn.Module):
             temperature = max(0.1, min(2.0, temperature))
 
         personality_blend = self._compute_personality_blend(
-            dominant_state, narr_result['identity_strength'].item(),
+            dominant_state_t.item() if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t,
+            narr_result['identity_strength'].item(),
             attractor_state=personality_info.get('personality_state', None),
         )
         attention_bias = attention_map.detach()
 
-        # Batch all deferred .item() calls at single sync point
+        # ── Batch scalar extraction ──
+        # ALL .item() calls are grouped here to minimize GPU sync points.
+        # Each .item() forces a device sync on GPU; batching them at the
+        # end of the tick avoids ~25 individual syncs scattered through
+        # the computation path.
+        _coherence = coherence.item() if isinstance(coherence, torch.Tensor) else coherence
+        _crit_dist = criticality_distance.item() if isinstance(criticality_distance, torch.Tensor) else criticality_distance
+        _crit_br = crit_sigma.item() if isinstance(crit_sigma, torch.Tensor) else crit_sigma
+        _crit_sus = crit['susceptibility'].item()
+        _crit_Rm = crit['R_mean'].item()
+        _crit_Rv = crit['R_var'].item()
+        _pi_coup = crit_pi['coupling_adjustment'].item()
+        _pi_noise = crit_pi['noise_adjustment'].item()
+        _fe = free_energy.item()
+        _sr_nl = sr_result['noise_level'].item()
+        _sr_snr = sr_result['snr'].item()
+        _id_str = narr_result['identity_strength'].item()
+        _narr_dev = narr_result['deviation'].item()
+        _self_pe = self_result['self_prediction_error_magnitude'].item()
+        _sens_flow = blanket['sensory_flow'].item()
+        _act_flow = blanket['active_flow'].item()
+        _mean_fit = arena_result['mean_fitness'].item()
+        _fit_var = arena_result['fitness_variance'].item()
+        _n_mem = self.episodic_buffer.num_stored.item()
+        _adapt_lr = adaptive_lr.mean().item()
+        _mean_vol = vol_result['mean_volatility'].item()
+        _tick_val = self.tick_count.item()
+        _reset_s = sc['reset_strength'].item() if isinstance(sc['reset_strength'], torch.Tensor) else sc['reset_strength']
+        _coup_sc = sc['coupling_scale'].item() if isinstance(sc['coupling_scale'], torch.Tensor) else sc['coupling_scale']
+        _dom_ratio = dominance_ratio.item() if isinstance(dominance_ratio, torch.Tensor) else dominance_ratio
+        _coal_ent = coalition_entropy.item() if isinstance(coalition_entropy, torch.Tensor) else coalition_entropy
+        _dominant_state = dominant_state_t.item() if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
+        _comb_motiv = combined_motivation.item() if isinstance(combined_motivation, torch.Tensor) else combined_motivation
+
         if _sl_result is not None:
             stuart_landau_info = {
                 'amplitudes': _sl_result['amplitudes'].detach(),
@@ -1166,56 +1332,55 @@ class CognitiveCycle(nn.Module):
                 'personality_blend': personality_blend,
                 'attention_bias': attention_bias,
                 'processing_mode': processing_mode,
-                'coherence': coherence,
-                'dominant_state': dominant_state,
-                'motivation': combined_motivation,
+                'coherence': _coherence,
+                'dominant_state': _dominant_state,
+                'motivation': _comb_motiv,
                 'sleep_signal': sleep_signal,
             },
             'consciousness': {
-                'free_energy': free_energy.item(),
-                'coherence': coherence,
-                'criticality_distance': criticality_distance,
-                'criticality_sigma': crit['branching_ratio'].item(),
-                'branching_ratio': crit['branching_ratio'].item(),
-                'susceptibility': crit['susceptibility'].item(),
-                'coalition_entropy': coalition_entropy,
-                'dominance_ratio': dominance_ratio,
+                'free_energy': _fe,
+                'coherence': _coherence,
+                'criticality_distance': _crit_dist,
+                'criticality_sigma': _crit_br,
+                'branching_ratio': _crit_br,
+                'susceptibility': _crit_sus,
+                'coalition_entropy': _coal_ent,
+                'dominance_ratio': _dom_ratio,
                 'processing_mode': processing_mode,
-                'sr_noise_level': sr_result['noise_level'].item(),
-                'sr_snr': sr_result['snr'].item(),
+                'sr_noise_level': _sr_nl,
+                'sr_snr': _sr_snr,
             },
             'self_state': {
-                'identity_strength': narr_result['identity_strength'].item(),
-                'narrative_deviation': narr_result['deviation'].item(),
-                'self_prediction_error': self_result['self_prediction_error_magnitude'].item(),
-                'sensory_flow': blanket['sensory_flow'].item(),
-                'active_flow': blanket['active_flow'].item(),
+                'identity_strength': _id_str,
+                'narrative_deviation': _narr_dev,
+                'self_prediction_error': _self_pe,
+                'sensory_flow': _sens_flow,
+                'active_flow': _act_flow,
             },
             'learning': {
-                'mean_fitness': arena_result['mean_fitness'].item(),
-                'fitness_variance': arena_result['fitness_variance'].item(),
-                'num_memories': self.episodic_buffer.num_stored.item(),
+                'mean_fitness': _mean_fit,
+                'fitness_variance': _fit_var,
+                'num_memories': _n_mem,
                 'consolidation': consolidation_info,
-                'combined_motivation': combined_motivation,
-                'adaptive_lr': adaptive_lr.mean().item(),
-                'mean_volatility': vol_result['mean_volatility'].item(),
+                'combined_motivation': _comb_motiv,
+                'adaptive_lr': _adapt_lr,
+                'mean_volatility': _mean_vol,
             },
             'diagnostics': {
-                'tick': self.tick_count.item(),
+                'tick': _tick_val,
                 'phases': phases.detach(),
                 'top_beliefs': top_beliefs.detach(),
                 'precision': prec_result['precision'].detach(),
                 'resources': arena_result['resources'].detach(),
                 'neuromodulator_levels': levels.detach(),
-                # Criticality metrics (accessible here for benchmarks)
-                'criticality_sigma': crit['branching_ratio'].item(),
-                'branching_ratio': crit['branching_ratio'].item(),
-                'criticality_distance': criticality_distance,
-                'susceptibility': crit['susceptibility'].item(),
-                'R_mean_crit': crit['R_mean'].item(),
-                'R_var_crit': crit['R_var'].item(),
-                'coupling_adjustment': crit_pi['coupling_adjustment'].item(),
-                'noise_adjustment': crit_pi['noise_adjustment'].item(),
+                'criticality_sigma': _crit_br,
+                'branching_ratio': _crit_br,
+                'criticality_distance': _crit_dist,
+                'susceptibility': _crit_sus,
+                'R_mean_crit': _crit_Rm,
+                'R_var_crit': _crit_Rv,
+                'coupling_adjustment': _pi_coup,
+                'noise_adjustment': _pi_noise,
                 **stuart_landau_info,
                 **mean_field_info,
                 **koopman_info,
@@ -1234,30 +1399,30 @@ class CognitiveCycle(nn.Module):
                 **somatic_info,
                 'theta_gate_value': theta_gate_value,
                 'input_novelty': sc['input_novelty'],
-                'phase_reset_strength': sc['reset_strength'].item()
-                    if isinstance(sc['reset_strength'], torch.Tensor)
-                    else sc['reset_strength'],
-                'coupling_scale': sc['coupling_scale'].item()
-                    if isinstance(sc['coupling_scale'], torch.Tensor)
-                    else sc['coupling_scale'],
+                'phase_reset_strength': _reset_s,
+                'coupling_scale': _coup_sc,
             },
         }
 
-    def _compute_temperature(self, coherence: float, criticality_distance: float) -> float:
+    def _compute_temperature(self, coherence, criticality_distance) -> float:
         """
         Map consciousness state to LLM temperature.
 
         High coherence + near criticality → lower temperature (focused)
         Low coherence + far from criticality → higher temperature (creative)
+
+        Accepts both float and tensor inputs. Returns float.
         """
         # Base temperature from coherence (inverted: high coherence = low temp)
         base_temp = 1.0 - 0.5 * coherence  # [0.5, 1.0]
 
         # Criticality modulation: near critical = slightly more creative
-        crit_mod = 0.1 * max(0, 1.0 - criticality_distance)
-
-        # Clamp to reasonable range
-        temp = max(0.1, min(2.0, base_temp + crit_mod))
+        if isinstance(criticality_distance, torch.Tensor):
+            crit_mod = 0.1 * (1.0 - criticality_distance).clamp(min=0)
+            temp = (base_temp + crit_mod).clamp(min=0.1, max=2.0).item()
+        else:
+            crit_mod = 0.1 * max(0, 1.0 - criticality_distance)
+            temp = max(0.1, min(2.0, base_temp + crit_mod))
         return temp
 
     def _compute_personality_blend(self, dominant_state: int,
@@ -1316,6 +1481,7 @@ class CognitiveCycle(nn.Module):
     def reset(self):
         """Reset all module states."""
         self.tick_count.zero_()
+        self._tick_py = 0
         self.hpc.reset()
         self.precision.reset()
         self.metastability.reset()
@@ -1365,6 +1531,180 @@ class CognitiveCycle(nn.Module):
         if self._evidence_aggregator is not None:
             self._evidence_aggregator.clear()
         # Phase cache is not reset (accumulated knowledge persists)
+
+    @staticmethod
+    def _detect_compile_backend(preferred: str, device: str = "cpu") -> str:
+        """Choose the best available torch.compile backend.
+
+        On CUDA, ``inductor`` generates fused Triton kernels — always
+        available.  On CPU, it generates C++/OpenMP loops which require
+        a C++ compiler (``cl.exe`` on Windows, ``gcc``/``clang`` on Linux).
+        When no compiler is found, returns ``None`` to signal that
+        compilation should be skipped entirely (``aot_eager`` adds
+        overhead without kernel fusion).
+
+        Returns:
+            Backend name, or None if compilation is not beneficial.
+        """
+        if preferred not in ("inductor", "auto"):
+            return preferred
+
+        # CUDA always has Triton
+        if device != "cpu" or torch.cuda.is_available():
+            # If current device is CUDA or could be, inductor works
+            if device != "cpu":
+                return "inductor"
+
+        # CPU: inductor needs a C++ compiler
+        import sys
+        if sys.platform == "win32":
+            import shutil
+            if shutil.which("cl") is None:
+                logger.info(
+                    "cl.exe not found — torch.compile skipped on CPU "
+                    "(install MSVC Build Tools, or use .to('cuda') "
+                    "for Triton-based compilation)"
+                )
+                return None
+        elif sys.platform != "darwin":
+            # Linux: check for gcc/g++
+            import shutil
+            if shutil.which("gcc") is None and shutil.which("g++") is None:
+                logger.info("No C++ compiler found — torch.compile skipped")
+                return None
+        return "inductor"
+
+    def compile_modules(self, mode: str = "default",
+                        backend: str = "inductor") -> 'CognitiveCycle':
+        """Apply torch.compile to performance-critical submodules.
+
+        Fuses small tensor operations (sin, cos, clamp, mul, add) into
+        fewer kernel launches.  On CPU, inductor generates C++/OpenMP loops.
+        On CUDA, it generates fused Triton kernels or CUDA graphs.
+        Falls back to ``aot_eager`` on Windows when MSVC is unavailable.
+
+        Modules compiled:
+        - oscillators (LearnableKuramotoBank) — Kuramoto dynamics
+        - _sensory_coupling (SensoryCoupling) — input-to-oscillator coupling
+        - hpc (HierarchicalPredictiveCoding) — predictive coding hierarchy
+        - precision (AttentionAsPrecision) — precision weighting
+        - criticality feedback function — extracted pure-tensor loop
+        - phase_to_state, error_to_levels, state_to_group — linear projections
+
+        The tick() method itself is NOT compiled because it has extensive
+        Python branching (optional modules, dict construction). Instead we
+        compile the leaf modules; Dynamo traces through their forward()
+        calls when they are invoked from tick().
+
+        Args:
+            mode: Compile mode.
+                "default" — balanced compile time vs runtime speed
+                "reduce-overhead" — uses CUDA graphs; best for CUDA with
+                    static shapes (requires PyTorch >= 2.1)
+                "max-autotune" — longest compile, fastest runtime
+            backend: Compilation backend. "inductor" (default, auto-detected),
+                "aot_eager" (no codegen, still optimizes graph), or
+                "eager" (no-op, useful for debugging graph breaks).
+
+        Returns:
+            self (for chaining: ``cycle.compile_modules().to("cuda")``)
+        """
+        global _compiled_criticality_feedback
+
+        if not hasattr(torch, 'compile'):
+            logger.info("torch.compile unavailable (PyTorch < 2.0), skipping")
+            return self
+
+        # Auto-detect the best available backend based on current device
+        device = str(next(self.parameters()).device)
+        backend = self._detect_compile_backend(backend, device=device)
+        if backend is None:
+            return self
+
+        # Smoke test: verify the backend can actually compile + run code.
+        # This catches missing Triton (CUDA) or cl.exe (CPU) early,
+        # before we wrap all modules and hit runtime failures.
+        try:
+            _test = torch.compile(lambda x: x + 1, backend=backend,
+                                  fullgraph=True)
+            _test(torch.tensor(1.0, device=device))
+        except Exception as e:
+            logger.warning(
+                "torch.compile smoke test failed (%s backend): %s — "
+                "skipping compilation", backend, e
+            )
+            return self
+
+        # Suppress runtime compilation errors so a single module failure
+        # doesn't crash the whole system — just falls back to eager.
+        _dynamo = __import__('torch._dynamo', fromlist=['config'])
+        _dynamo.config.suppress_errors = True
+        # HPC has multiple PredictiveLevel instances with different dims
+        # (e.g. [64, 32, 16]), each needing a separate specialization.
+        # Default cache_size_limit=8 is too low; raise to 32.
+        _dynamo.config.cache_size_limit = 32
+
+        compiled = []
+        failed = []
+
+        def _try_compile(name, module):
+            try:
+                out = torch.compile(module, mode=mode, backend=backend,
+                                    fullgraph=False)
+                compiled.append(name)
+                return out
+            except Exception as e:
+                failed.append((name, str(e)))
+                return module
+
+        # Core dynamics
+        self.oscillators = _try_compile("oscillators", self.oscillators)
+        self._sensory_coupling = _try_compile(
+            "sensory_coupling", self._sensory_coupling
+        )
+
+        # Predictive coding
+        self.hpc = _try_compile("hpc", self.hpc)
+        self.precision = _try_compile("precision", self.precision)
+
+        # Criticality monitors
+        self._kuramoto_criticality = _try_compile(
+            "kuramoto_criticality", self._kuramoto_criticality
+        )
+        self.criticality = _try_compile("criticality", self.criticality)
+
+        # Stochastic resonance (has .item() graph breaks but partial
+        # compilation of the detection kernel still helps)
+        self.stochastic_resonance = _try_compile(
+            "stochastic_resonance", self.stochastic_resonance
+        )
+
+        # Linear projections (trivially compiled)
+        self.phase_to_state = _try_compile("phase_to_state", self.phase_to_state)
+        self.error_to_levels = _try_compile("error_to_levels", self.error_to_levels)
+
+        # Criticality feedback standalone function
+        try:
+            _compiled_criticality_feedback = torch.compile(
+                _criticality_feedback, mode=mode, backend=backend,
+                fullgraph=True,
+            )
+            compiled.append("criticality_feedback")
+        except Exception as e:
+            failed.append(("criticality_feedback", str(e)))
+
+        # Neuromodulation + volatility (small but frequently called)
+        self.neuromodulation = _try_compile("neuromodulation", self.neuromodulation)
+        self.volatility_gate = _try_compile("volatility_gate", self.volatility_gate)
+
+        if compiled:
+            logger.info("Compiled %d modules (%s backend): %s",
+                        len(compiled), backend, ", ".join(compiled))
+        if failed:
+            logger.warning("Failed to compile %d modules: %s",
+                           len(failed),
+                           ", ".join(f"{n}: {e}" for n, e in failed))
+        return self
 
 
 if __name__ == '__main__':

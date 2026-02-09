@@ -9,34 +9,79 @@ for comparison benchmarking. They are NOT part of PyQuifer's test suite.
 import pytest
 from pathlib import Path
 
+# collect_ignore prevents pytest from importing conftest.py files in these
+# directories (collect_ignore_glob does NOT prevent conftest.py discovery).
+_BENCH_DIR = Path(__file__).parent
+_VENDORED_DIRS = [
+    "alphagenome",
+    "bbeh",
+    "beir",
+    "bifurcation",
+    "BIG-bench",
+    "bigcode-evaluation-harness",
+    "chessqa-benchmark",
+    "code_contests",
+    "dm_control",
+    "EGG",
+    "emergent_communication_at_scale",
+    "FactBench",
+    "FactReasoner",
+    "FActScore",
+    "formal-conjectures",
+    "gpqa",
+    "grade-school-math",
+    "Gymnasium",
+    "hanabi-learning-environment",
+    "HarmBench",
+    "helm",
+    "human-eval",
+    "jailbreakbench",
+    "KuraNet",
+    "lab",
+    "lava",
+    "lm-evaluation-harness",
+    "lmms-eval",
+    "MD-Bench",
+    "meltingpot",
+    "mlperf-inference",
+    "mlperf-training",
+    "MMMU",
+    "mteb",
+    "neurobench",
+    "neurodiscoverybench",
+    "nlb_tools",
+    "open_spiel",
+    "openai-evals",
+    "opencompass",
+    "osbenchmarks",
+    "perception_test",
+    "physics-IQ-benchmark",
+    "Plaskett_puzzle",
+    "PredBench",
+    "SciMLBenchmarks.jl",
+    "searchless_chess",
+    "SWE-bench",
+    "Torch2PC",
+    "torchdiffeq",
+    "torchdyn",
+    "TOXIGEN",
+    "TruthfulQA",
+    "Video-MME",
+    "VLMEvalKit",
+    "data",
+    "results",
+]
+
+# This list stops pytest from entering directories AND importing their conftest
+collect_ignore = [
+    str(_BENCH_DIR / d)
+    for d in _VENDORED_DIRS
+    if (_BENCH_DIR / d).exists()
+]
+
+# Also add glob patterns for arXiv- prefixed dirs
 collect_ignore_glob = [
-    # Third-party vendored repos (alphabetical)
     "arXiv-*/**",
-    "bifurcation/**",
-    "chessqa-benchmark/**",
-    "EGG/**",
-    "emergent_communication_at_scale/**",
-    "Gymnasium/**",
-    "hanabi-learning-environment/**",
-    "KuraNet/**",
-    "lava/**",
-    "MD-Bench/**",
-    "meltingpot/**",
-    "neurobench/**",
-    "neurodiscoverybench/**",
-    "nlb_tools/**",
-    "open_spiel/**",
-    "osbenchmarks/**",
-    "Plaskett_puzzle/**",
-    "PredBench/**",
-    "SciMLBenchmarks.jl/**",
-    "searchless_chess/**",
-    "Torch2PC/**",
-    "torchdiffeq/**",
-    "torchdyn/**",
-    # Runtime artifacts
-    "data/**",
-    "results/**",
 ]
 
 

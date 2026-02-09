@@ -465,8 +465,9 @@ class EpistemicValue(nn.Module):
         # Posterior: tentatively add this observation to the counts
         bin_indices = self._bin_values(observation)
         posterior_counts = self.belief_counts.clone()
-        for d in range(self.dim):
-            posterior_counts[d, bin_indices[d]] += 1.0
+        # Vectorized scatter: increment the bin for each dimension at once
+        dim_indices = torch.arange(self.dim, device=observation.device)
+        posterior_counts[dim_indices, bin_indices] += 1.0
         posterior_probs = posterior_counts / posterior_counts.sum(dim=-1, keepdim=True).clamp(min=1e-8)
 
         H_prior = self._entropy(self.belief_counts)
@@ -486,10 +487,9 @@ class EpistemicValue(nn.Module):
 
         # Actually update the belief distribution
         with torch.no_grad():
-            # EMA update: blend new observation into existing counts
+            # EMA update: blend new observation into existing counts (vectorized)
             new_counts = torch.zeros_like(self.belief_counts)
-            for d in range(self.dim):
-                new_counts[d, bin_indices[d]] = 1.0
+            new_counts[dim_indices, bin_indices] = 1.0
             self.belief_counts.mul_(1 - self.tau).add_(new_counts * self.tau)
             # Re-add Laplace smoothing to prevent zero bins
             self.belief_counts.clamp_(min=0.01)

@@ -157,7 +157,7 @@ class AdaptiveStochasticResonance(nn.Module):
         return signal * detected
 
     def _measure_snr(self, signal: torch.Tensor, noise_level: float,
-                     num_trials: int = 10) -> float:
+                     num_trials: int = 3) -> float:
         """
         Measure SNR using signal detection theory (d-prime inspired).
 
@@ -167,38 +167,45 @@ class AdaptiveStochasticResonance(nn.Module):
         - Optimal noise: hit_rate high, false_alarm low → peak SNR
         - Too much noise: hit_rate ≈ 1, false_alarm ≈ 1 → low SNR
           (noise alone triggers detection, so detection is meaningless)
+
+        Vectorized: generates all trials at once to avoid Python loops.
         """
-        hit_rates = []
-        false_alarm_rates = []
+        # Vectorized: generate all noise trials in one batch
+        # signal shape: (dim,) or (1, dim) → expand to (num_trials, dim)
+        sig = signal if signal.dim() == 1 else signal.squeeze(0)
+        sig_expanded = sig.unsqueeze(0).expand(num_trials, -1)  # (T, dim)
 
-        for _ in range(num_trials):
-            # Hit: detection with signal present
-            noise = self._generate_noise(signal, noise_level)
-            noisy_signal = signal + noise
-            hits = (noisy_signal.abs() > self.threshold).float()
-            hit_rates.append(hits.mean().item())
+        # Hit trials: signal + noise
+        if self.noise_type == 'ou' and hasattr(self, 'ou_noise'):
+            # OU noise can't be batched easily, fall back to loop
+            hit_noise = torch.stack([self.ou_noise(like=sig) * noise_level
+                                     for _ in range(num_trials)])
+            fa_noise = torch.stack([self.ou_noise(like=sig) * noise_level
+                                    for _ in range(num_trials)])
+        else:
+            hit_noise = torch.randn(num_trials, sig.shape[-1],
+                                    device=sig.device) * noise_level
+            fa_noise = torch.randn(num_trials, sig.shape[-1],
+                                   device=sig.device) * noise_level
 
-            # False alarm: detection with no signal (just noise)
-            noise_only = self._generate_noise(signal, noise_level)
-            false_alarms = (noise_only.abs() > self.threshold).float()
-            false_alarm_rates.append(false_alarms.mean().item())
+        # Hit rate: detection with signal present
+        noisy_signals = sig_expanded + hit_noise  # (T, dim)
+        hits = (noisy_signals.abs() > self.threshold).float()
+        hit_rate = hits.mean().item()
 
-        hit_rate = sum(hit_rates) / num_trials
-        false_alarm_rate = sum(false_alarm_rates) / num_trials
+        # False alarm rate: detection with no signal (just noise)
+        false_alarms = (fa_noise.abs() > self.threshold).float()
+        false_alarm_rate = false_alarms.mean().item()
 
         # d-prime: discriminability (hit_rate - false_alarm_rate)
-        # Peaks when signal genuinely helps detection beyond noise alone
         discriminability = max(0.0, hit_rate - false_alarm_rate)
 
-        # Output fidelity: mean power of detected signal
-        mean_detected = torch.zeros_like(signal)
-        for _ in range(num_trials):
-            mean_detected += self._detect(signal, noise_level)
-        mean_detected /= num_trials
+        # Output fidelity: vectorized detection + mean power
+        detected_mask = (noisy_signals.abs() > self.threshold).float()
+        mean_detected = (sig_expanded * detected_mask).mean(dim=0)
         fidelity = mean_detected.pow(2).mean().item()
 
         # Combined SNR: discriminability * fidelity
-        # This peaks at optimal noise
         snr = discriminability * fidelity / (noise_level ** 2 + 1e-8)
         return snr
 
@@ -246,8 +253,9 @@ class AdaptiveStochasticResonance(nn.Module):
 
             self.noise_level.clamp_(self.min_noise, self.max_noise)
 
-            # Record history
-            current_snr = self._measure_snr(signal, self.noise_level.item())
+            # Use the better of the two probes as current SNR estimate
+            # (avoids a 3rd _measure_snr call)
+            current_snr = max(snr_plus, snr_minus)
             self.current_snr.fill_(current_snr)
             idx = self.step_count % 100
             self.snr_history[idx] = current_snr

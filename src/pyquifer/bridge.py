@@ -90,6 +90,21 @@ class PyQuiferBridge(nn.Module):
       Level 2 (medium): + logit biasing from personality/motivation
       Level 3 (deep): + hidden state injection via coupling equation
 
+    Training policy
+    ---------------
+    ``trait_vectors`` and ``modulation_gain`` are ``nn.Parameter`` and
+    **can** be fine-tuned when the bridge is used inside a training loop
+    (e.g. RLHF, SFT).  However, **gradient does NOT flow back to the
+    oscillators** — the CognitiveCycle is always run inside
+    ``torch.no_grad()`` for its buffer updates, and ``ModulationState``
+    tensors (phases, neuromodulator_levels) are ``.detach()``-ed before
+    injection into hidden states.
+
+    In the benchmark suite the bridge runs in **eval-only mode**:
+    ``bridge.eval()`` is not strictly required (the cycle already
+    manages its own no_grad blocks) but is recommended for clarity.
+    No optimizer is created for bridge parameters during benchmarking.
+
     Example (Level 1 - HuggingFace):
         bridge = PyQuiferBridge.default()
         for step in range(100):
@@ -140,6 +155,49 @@ class PyQuiferBridge(nn.Module):
         """Lightweight bridge for testing or low-resource environments."""
         from pyquifer.integration import CycleConfig
         return PyQuiferBridge(CycleConfig.small())
+
+    @staticmethod
+    def interactive():
+        """Bridge tuned for real-time streaming (<=2ms target).
+
+        Uses hierarchical timestepping and reduced HPC iterations.
+        """
+        from pyquifer.integration import CycleConfig
+        return PyQuiferBridge(CycleConfig.interactive())
+
+    @staticmethod
+    def realtime():
+        """Bridge for absolute minimum latency (<1.5ms target).
+
+        Maximum hierarchical timestepping. Best for high-frequency
+        tick loops (10+ Hz) where responsive feel matters more
+        than per-tick accuracy.
+        """
+        from pyquifer.integration import CycleConfig
+        return PyQuiferBridge(CycleConfig.realtime())
+
+    def compile(self, mode: str = "default",
+                backend: str = "inductor") -> 'PyQuiferBridge':
+        """Apply torch.compile to performance-critical submodules.
+
+        Fuses small tensor operations into fewer kernel launches for
+        lower tick latency.  Safe to call on any platform — silently
+        falls back to eager mode when compilation is unavailable.
+
+        Typical usage::
+
+            bridge = PyQuiferBridge.realtime().compile()
+
+        Args:
+            mode: "default", "reduce-overhead" (CUDA graphs), or
+                  "max-autotune".
+            backend: "inductor" (default) or "eager" (debugging).
+
+        Returns:
+            self (for chaining)
+        """
+        self.cycle.compile_modules(mode=mode, backend=backend)
+        return self
 
     def step(self,
              sensory_input: torch.Tensor,
@@ -228,12 +286,17 @@ class PyQuiferBridge(nn.Module):
         token distribution (1-10% logit shifts).
 
         Args:
-            logits: Raw logits from LLM (batch, vocab_size)
+            logits: Raw logits from LLM.  Supports both
+                    ``(batch, vocab_size)`` and ``(batch, seq_len, vocab_size)``
+                    shapes.  The last dimension is always treated as vocab.
             state: ModulationState from step()
 
         Returns:
-            Modified logits (same shape)
+            Modified logits (same shape as input)
         """
+        assert logits.dim() in (2, 3), (
+            f"modulate_logits expects 2D (B,V) or 3D (B,T,V) logits, got {logits.dim()}D"
+        )
         # Temperature scaling (standard)
         modified = logits / max(state.temperature, 0.01)
 
@@ -291,7 +354,7 @@ class PyQuiferBridge(nn.Module):
         # Detached — oscillator state is read-only from LLM's perspective
         coherence = state.coherence
         if state.neuromodulator_levels is not None:
-            nm_gain = state.neuromodulator_levels.mean()
+            nm_gain = state.neuromodulator_levels.to(device).mean()
         else:
             nm_gain = torch.tensor(0.5, device=device)
         amplitude = coherence * nm_gain * self.modulation_gain
@@ -351,6 +414,46 @@ class PyQuiferBridge(nn.Module):
         self._latency_ema.zero_()
         self._latency_count.zero_()
 
+    def prepare_sensory_input(self,
+                              x: torch.Tensor,
+                              device: torch.device | str | None = None,
+                              dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Standardize a raw signal into a valid sensory input for step().
+
+        Handles:
+        - Multi-dimensional input: flattens to 1D via mean over leading dims
+        - Dimension mismatch: projects to ``config.state_dim``
+        - Device transfer: moves to *device* (defaults to bridge's device)
+        - Dtype cast: casts to *dtype* (defaults to float32)
+
+        Adapters should use this instead of manually slicing / padding::
+
+            sensory = bridge.prepare_sensory_input(
+                hidden_states.mean(dim=(0, 1)),  # e.g. (hidden_dim,)
+                device=hidden_states.device,
+            )
+            state = bridge.step(sensory)
+
+        Args:
+            x: Arbitrary tensor — (D,), (B, D), or (B, T, D).
+            device: Target device.  Defaults to the bridge module's device.
+            dtype: Target dtype.  Defaults to torch.float32.
+
+        Returns:
+            1-D tensor of shape ``(state_dim,)`` ready for ``step()``.
+        """
+        if device is None:
+            device = next(self.parameters()).device
+        if dtype is None:
+            dtype = torch.float32
+
+        # Collapse to 1-D
+        if x.dim() > 1:
+            x = x.mean(dim=tuple(range(x.dim() - 1)))  # keep last dim
+
+        x = x.to(device=device, dtype=dtype)
+        return self._project_input(x)
+
     def _project_input(self, x: torch.Tensor) -> torch.Tensor:
         """Project arbitrary input to state_dim."""
         target = self.config.state_dim
@@ -384,6 +487,185 @@ class PyQuiferBridge(nn.Module):
         coherence_mod = -coherence * 0.1  # High coherence tightens
         crit_mod = max(0, 1.0 - criticality_distance) * 0.05  # Near critical loosens
         return max(0.5, min(1.0, base + coherence_mod + crit_mod))
+
+
+class PyQuiferLogitsProcessor:
+    """HuggingFace-compatible LogitsProcessor for bridge modulation.
+
+    Plugs into ``model.generate(logits_processor=[...])`` so you don't
+    need to override ``_model_generate()``.  Calls ``bridge.modulate_logits()``
+    on every token.
+
+    Usage::
+
+        from transformers import LogitsProcessorList
+        from pyquifer.bridge import PyQuiferBridge, PyQuiferLogitsProcessor
+
+        bridge = PyQuiferBridge.default()
+        state = bridge.step(sensory)
+        processor = PyQuiferLogitsProcessor(bridge, state)
+
+        output = model.generate(
+            input_ids,
+            logits_processor=LogitsProcessorList([processor]),
+        )
+
+    For stepped modulation (bridge.step() every N tokens), combine with
+    :class:`SteppedModulator`::
+
+        stepper = SteppedModulator(bridge, step_every=8)
+        processor = PyQuiferLogitsProcessor(bridge, stepper=stepper, sensory=sensory)
+    """
+
+    def __init__(self,
+                 bridge: 'PyQuiferBridge',
+                 state: Optional[ModulationState] = None,
+                 stepper: Optional['SteppedModulator'] = None,
+                 sensory: Optional[torch.Tensor] = None):
+        """
+        Args:
+            bridge: The PyQuiferBridge instance.
+            state: Fixed ModulationState to use (if no stepper).
+            stepper: Optional SteppedModulator for per-token stepping.
+            sensory: Sensory input for the stepper (required if stepper is set).
+        """
+        self.bridge = bridge
+        self._state = state
+        self._stepper = stepper
+        self._sensory = sensory
+
+    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        """Apply bridge modulation to scores (logits).
+
+        Args:
+            input_ids: (batch, seq_len) — generated tokens so far.
+            scores: (batch, vocab_size) — logits for next token.
+
+        Returns:
+            Modified scores (same shape).
+        """
+        if self._stepper is not None and self._sensory is not None:
+            state = self._stepper.step(self._sensory)
+        elif self._state is not None:
+            state = self._state
+        else:
+            return scores  # No state available, pass through
+        return self.bridge.modulate_logits(scores, state)
+
+
+class SteppedModulator:
+    """Amortizes ``bridge.step()`` over multiple tokens via interpolation.
+
+    Instead of calling the full cognitive cycle every token (which costs
+    ~45ms on CPU), this helper calls ``step()`` once every *step_every*
+    tokens and returns linearly-interpolated :class:`ModulationState`
+    objects in between.
+
+    With ``step_every=16``, per-token overhead drops from ~45ms to ~0.3ms
+    (only modulate_logits/modulate_hidden run on non-step tokens).
+
+    Usage::
+
+        bridge = PyQuiferBridge.default()
+        stepper = SteppedModulator(bridge, step_every=8)
+        for token_idx in range(num_tokens):
+            state = stepper.step(sensory_input)
+            logits = bridge.modulate_logits(raw_logits, state)
+
+    Args:
+        bridge: The :class:`PyQuiferBridge` to wrap.
+        step_every: Run ``bridge.step()`` once per this many tokens.
+    """
+
+    def __init__(self, bridge: PyQuiferBridge, step_every: int = 8):
+        self.bridge = bridge
+        self.step_every = max(1, step_every)
+        self._token_count: int = 0
+        self._prev_state: Optional[ModulationState] = None
+        self._curr_state: Optional[ModulationState] = None
+
+    def step(self,
+             sensory_input: torch.Tensor,
+             reward: float = 0.0,
+             sleep_signal: float = 0.0) -> ModulationState:
+        """Return the current (possibly interpolated) modulation state.
+
+        Calls ``bridge.step()`` on every *step_every*-th invocation.
+        On other calls, returns a linearly-interpolated state.
+        """
+        if self._token_count % self.step_every == 0:
+            self._prev_state = self._curr_state
+            self._curr_state = self.bridge.step(
+                sensory_input, reward=reward, sleep_signal=sleep_signal,
+            )
+        self._token_count += 1
+
+        if self._prev_state is None or self.step_every <= 1:
+            return self._curr_state  # type: ignore[return-value]
+
+        alpha = (self._token_count % self.step_every) / self.step_every
+        if alpha == 0.0:
+            # Exactly on step boundary — return fresh state
+            return self._curr_state  # type: ignore[return-value]
+        return _interpolate_state(self._prev_state, self._curr_state, alpha)
+
+    @property
+    def current_state(self) -> Optional[ModulationState]:
+        """Last computed (non-interpolated) state."""
+        return self._curr_state
+
+    def reset(self):
+        """Reset token counter and cached states."""
+        self._token_count = 0
+        self._prev_state = None
+        self._curr_state = None
+        self.bridge.reset()
+
+
+def _interpolate_state(s1: ModulationState, s2: ModulationState,
+                       alpha: float) -> ModulationState:
+    """Linear interpolation between two ModulationStates.
+
+    Scalar fields are lerped.  Tensor fields use ``torch.lerp``.
+    Categorical/string fields take the value from *s2* (the newer state).
+    """
+    def _lerp_f(a: float, b: float) -> float:
+        return a * (1 - alpha) + b * alpha
+
+    def _lerp_t(a: Optional[torch.Tensor],
+                b: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if a is None or b is None:
+            return b
+        return torch.lerp(a, b, alpha)
+
+    # Interpolate facet_weights (both are lists of the same length)
+    if len(s1.facet_weights) == len(s2.facet_weights):
+        blended_weights = [
+            w1 * (1 - alpha) + w2 * alpha
+            for w1, w2 in zip(s1.facet_weights, s2.facet_weights)
+        ]
+    else:
+        blended_weights = s2.facet_weights
+
+    return ModulationState(
+        temperature=_lerp_f(s1.temperature, s2.temperature),
+        repetition_penalty=_lerp_f(s1.repetition_penalty, s2.repetition_penalty),
+        top_p=_lerp_f(s1.top_p, s2.top_p),
+        dominant_facet=s2.dominant_facet,
+        facet_weights=blended_weights,
+        personality_stability=_lerp_f(s1.personality_stability, s2.personality_stability),
+        attention_bias=_lerp_t(s1.attention_bias, s2.attention_bias),
+        processing_mode=s2.processing_mode,
+        coherence=_lerp_f(s1.coherence, s2.coherence),
+        motivation=_lerp_f(s1.motivation, s2.motivation),
+        free_energy=_lerp_f(s1.free_energy, s2.free_energy),
+        criticality_distance=_lerp_f(s1.criticality_distance, s2.criticality_distance),
+        identity_strength=_lerp_f(s1.identity_strength, s2.identity_strength),
+        tick=s2.tick,
+        phases=_lerp_t(s1.phases, s2.phases),
+        neuromodulator_levels=_lerp_t(s1.neuromodulator_levels, s2.neuromodulator_levels),
+        step_latency_ms=s2.step_latency_ms,
+    )
 
 
 if __name__ == '__main__':
