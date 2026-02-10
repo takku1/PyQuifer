@@ -32,10 +32,42 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, NamedTuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+# Processing mode constants (tensor-friendly, no strings in hot path)
+PROCESSING_MODE_PERCEPTION = 0
+PROCESSING_MODE_IMAGINATION = 1
+PROCESSING_MODE_BALANCED = 2
+PROCESSING_MODE_NAMES = {
+    PROCESSING_MODE_PERCEPTION: "perception",
+    PROCESSING_MODE_IMAGINATION: "imagination",
+    PROCESSING_MODE_BALANCED: "balanced",
+}
+_PROCESSING_MODE_FROM_STR = {v: k for k, v in PROCESSING_MODE_NAMES.items()}
+
+
+class TickResult(NamedTuple):
+    """Tensor-only return type for minimal tick (return_diagnostics=False).
+
+    ALL fields are tensors — no Python strings, ints, or dicts.
+    This makes TickResult compatible with torch.compile, CUDA graphs,
+    and allocation-free replay.
+
+    Use ``PROCESSING_MODE_NAMES[int(result.processing_mode)]`` to recover
+    the string name when needed (diagnostics/logging only).
+    """
+    temperature: torch.Tensor        # scalar (0-dim)
+    personality_blend: torch.Tensor   # (num_populations,) normalized weights
+    attention_bias: torch.Tensor      # (state_dim,) or (hierarchy_dims[0],)
+    processing_mode: torch.Tensor     # scalar int tensor (0=perception, 1=imagination, 2=balanced)
+    coherence: torch.Tensor           # scalar (0-dim)
+    dominant_state: torch.Tensor      # scalar int tensor
+    motivation: torch.Tensor          # scalar (0-dim)
+    sleep_signal: torch.Tensor        # scalar (0-dim)
 
 
 @dataclass
@@ -926,20 +958,23 @@ class CognitiveCycle(nn.Module):
 
         with torch.no_grad():
             # Phase reset: novel stimuli partially reset phases toward
-            # input-derived targets (event-related desynchronization)
+            # input-derived targets (event-related desynchronization).
+            # Uses clamped interpolation weight instead of branching on
+            # a tensor value — avoids GPU sync and is torch.compile safe.
             reset_s = sc['reset_strength']
-            if reset_s > 0.05:
-                blended = (
-                    (1.0 - reset_s) * self.oscillators.phases
-                    + reset_s * sc['phase_targets']
-                ) % (2 * math.pi)
-                self.oscillators.phases.copy_(blended)
+            # Threshold: below 0.05 → weight=0, above → actual reset_s
+            reset_w = (reset_s - 0.05).clamp(min=0.0) / max(1.0 - 0.05, 1e-8) * (1.0 - 0.05) + 0.05
+            reset_w = reset_s * (reset_s > 0.05).float()  # simpler: zero below threshold
+            blended = (
+                (1.0 - reset_w) * self.oscillators.phases
+                + reset_w * sc['phase_targets']
+            ) % (2 * math.pi)
+            self.oscillators.phases.copy_(blended)
 
             # Coupling modulation: input salience scales K
-            with torch.no_grad():
-                self.oscillators.coupling_strength.mul_(
-                    sc['coupling_scale']
-                ).clamp_(min=0.1, max=5.0)
+            self.oscillators.coupling_strength.mul_(
+                sc['coupling_scale']
+            ).clamp_(min=0.1, max=5.0)
 
         # ── Step 1: Oscillator dynamics ──
         # Frequency entrainment: input energy shifts natural frequencies
@@ -950,7 +985,8 @@ class CognitiveCycle(nn.Module):
         )
         order_param = self.oscillators.get_order_parameter()
         # Keep as tensor — .item() deferred to batch extraction block at end
-        coherence = order_param if isinstance(order_param, torch.Tensor) else torch.tensor(order_param, device=device)
+        # get_order_parameter() always returns a tensor
+        coherence = order_param
 
         # ── Step 1a2: Complex oscillator backend (parallel to real-valued) ──
         complex_osc_info = {}
@@ -1343,7 +1379,7 @@ class CognitiveCycle(nn.Module):
         if self._tick_py % c.step_every_motivation == 0 or self._cached_motiv is None:
             motiv_result = self.motivation(
                 sensory_input,
-                order_parameter=coherence.detach() if isinstance(coherence, torch.Tensor) else torch.tensor(coherence, device=device),
+                order_parameter=coherence.detach(),
             )
             self._cached_motiv = motiv_result
         else:
@@ -1455,9 +1491,10 @@ class CognitiveCycle(nn.Module):
 
                 # Motivation → Memory Priority wiring: high-motivation memories
                 # consolidate with amplified reward signal
-                if c.use_motivation_priority and combined_motivation > 0:
-                    # Scale rewards: motivation boosts consolidation priority
-                    priority_scale = 1.0 + combined_motivation * 0.5  # [1.0, ~2.0]
+                if c.use_motivation_priority:
+                    # Scale rewards: motivation boosts consolidation priority.
+                    # Clamp to >=1 so negative motivation doesn't shrink rewards.
+                    priority_scale = 1.0 + combined_motivation.clamp(min=0.0) * 0.5
                     replay_rewards = replay_rewards * priority_scale
 
                 # Circadian → Consolidation wiring: plasticity modulates consolidation
@@ -1623,8 +1660,40 @@ class CognitiveCycle(nn.Module):
         attention_bias = attention_map.detach()
 
         # ── Fast return path ──
-        # When return_diagnostics=False, skip all .item() conversions and
-        # dict construction.  Only return the modulation dict the bridge needs.
+        # When return_diagnostics=False, return a tensor-only TickResult.
+        # No .item() conversions, no dicts, no Python strings — fully
+        # compatible with torch.compile and CUDA graphs.
+        if not return_diagnostics:
+            # Temperature as scalar tensor
+            _temp_t = torch.tensor(temperature, device=device) if not isinstance(temperature, torch.Tensor) else temperature.to(device)
+            # Personality blend as tensor (list → tensor)
+            _pb = personality_blend
+            _pb_weights = _pb['facet_weights'] if isinstance(_pb, dict) else _pb
+            _pb_t = torch.tensor(_pb_weights, device=device, dtype=torch.float32) if not isinstance(_pb_weights, torch.Tensor) else _pb_weights
+            # Processing mode as int tensor
+            _pm_idx = _PROCESSING_MODE_FROM_STR.get(processing_mode, PROCESSING_MODE_BALANCED)
+            _pm_t = torch.tensor(_pm_idx, device=device, dtype=torch.long)
+            # Coherence as scalar tensor
+            _coh_t = coherence
+            # Dominant state as int tensor
+            _dom_t = dominant_state_t if isinstance(dominant_state_t, torch.Tensor) else torch.tensor(dominant_state_t, device=device, dtype=torch.long)
+            # Motivation as scalar tensor
+            _mot_t = combined_motivation if isinstance(combined_motivation, torch.Tensor) else torch.tensor(combined_motivation, device=device)
+            # Sleep signal as scalar tensor
+            _sleep_t = torch.tensor(sleep_signal, device=device) if not isinstance(sleep_signal, torch.Tensor) else sleep_signal
+
+            return TickResult(
+                temperature=_temp_t,
+                personality_blend=_pb_t,
+                attention_bias=attention_bias,
+                processing_mode=_pm_t,
+                coherence=_coh_t,
+                dominant_state=_dom_t,
+                motivation=_mot_t,
+                sleep_signal=_sleep_t,
+            )
+
+        # ── Diagnostic path: build full dicts (backward compat) ──
         _coherence_f = float(coherence) if isinstance(coherence, torch.Tensor) else coherence
         _dominant_state_f = int(dominant_state_t) if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
         _comb_motiv_f = float(combined_motivation) if isinstance(combined_motivation, torch.Tensor) else combined_motivation
@@ -1639,9 +1708,6 @@ class CognitiveCycle(nn.Module):
             'motivation': _comb_motiv_f,
             'sleep_signal': sleep_signal,
         }
-
-        if not return_diagnostics:
-            return {'modulation': modulation}
 
         # ── Batch scalar extraction ──
         # Most .item() calls are grouped here to minimize GPU sync points.
@@ -2073,6 +2139,14 @@ class CognitiveCycle(nn.Module):
         self.neuromodulation = _try_compile("neuromodulation", self.neuromodulation)
         self.volatility_gate = _try_compile("volatility_gate", self.volatility_gate)
 
+        # Store compilation status for diagnostics
+        self._compile_status = {
+            'compiled': compiled,
+            'failed': failed,
+            'mode': mode,
+            'backend': backend,
+        }
+
         if compiled:
             logger.info("Compiled %d modules (%s backend): %s",
                         len(compiled), backend, ", ".join(compiled))
@@ -2081,6 +2155,62 @@ class CognitiveCycle(nn.Module):
                            len(failed),
                            ", ".join(f"{n}: {e}" for n, e in failed))
         return self
+
+    def explain_graph_breaks(self, sensory_input: torch.Tensor = None
+                             ) -> Dict[str, Any]:
+        """Analyze graph breaks in compiled leaf modules using torch._dynamo.explain.
+
+        Returns a dict per module with break count and break reasons.
+        Useful as a regression gate: minimal tick should have 0 breaks
+        in critical modules (oscillators, precision, projections).
+
+        Args:
+            sensory_input: Optional (state_dim,) input for tracing.
+                          If None, creates a random input.
+
+        Returns:
+            Dict mapping module name → ``{'break_count': int, 'reasons': list}``.
+        """
+        try:
+            import torch._dynamo as dynamo
+        except ImportError:
+            return {'error': 'torch._dynamo not available'}
+
+        c = self.config
+        if sensory_input is None:
+            device = next(self.parameters()).device
+            sensory_input = torch.randn(c.state_dim, device=device)
+
+        results = {}
+
+        # Test key leaf modules with representative inputs
+        test_cases = {
+            'oscillators': (
+                self.oscillators,
+                (sensory_input[:c.num_oscillators],),
+                {'steps': 1, 'use_precision': True},
+            ),
+            'phase_to_state': (
+                self.phase_to_state,
+                (torch.sin(self.oscillators.phases).unsqueeze(0),),
+                {},
+            ),
+        }
+
+        for name, (module, args, kwargs) in test_cases.items():
+            try:
+                explanation = dynamo.explain(module)(*args, **kwargs)
+                results[name] = {
+                    'break_count': explanation.break_count,
+                    'reasons': [str(r) for r in explanation.break_reasons],
+                }
+            except Exception as e:
+                results[name] = {
+                    'break_count': -1,
+                    'reasons': [f'explain failed: {e}'],
+                }
+
+        return results
 
 
 if __name__ == '__main__':

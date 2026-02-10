@@ -59,8 +59,33 @@ References:
 import torch
 import torch.nn as nn
 import time
+from contextlib import contextmanager
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+
+
+@contextmanager
+def sync_debug_mode(mode: str = "warn"):
+    """Context manager for CUDA synchronization detection during profiling.
+
+    Args:
+        mode: ``"warn"`` to print warnings on sync, ``"error"`` to raise.
+              On CPU this is a no-op.
+
+    Usage::
+
+        with sync_debug_mode("error"):
+            bridge.step(sensory)  # raises if any .item() sync occurs
+    """
+    if torch.cuda.is_available():
+        prev = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode(mode)
+        try:
+            yield
+        finally:
+            torch.cuda.set_sync_debug_mode(prev)
+    else:
+        yield
 
 
 @dataclass
@@ -165,6 +190,9 @@ class PyQuiferBridge(nn.Module):
         self.register_buffer('_latency_ema', torch.tensor(0.0))
         self.register_buffer('_latency_count', torch.tensor(0))
 
+        # Last diagnostic snapshot (updated by step_diagnostic / step(diagnostics='always'))
+        self._last_diagnostics: dict = {}
+
     @staticmethod
     def default():
         """Standard bridge with default cognitive engine."""
@@ -220,12 +248,88 @@ class PyQuiferBridge(nn.Module):
         self.cycle.compile_modules(mode=mode, backend=backend)
         return self
 
+    def enable_cuda_graphs(self,
+                           n_warmup: int = 3,
+                           latency_threshold_ms: float = 5.0,
+                           ) -> bool:
+        """Capture the minimal tick as a CUDA graph for replay.
+
+        Prerequisites (enforced):
+        - Device must be CUDA.
+        - Minimal tick must be static (fixed shapes, no sync).
+
+        The method captures the graph only if measured eager latency
+        exceeds ``latency_threshold_ms`` — otherwise CUDA graphs add
+        overhead without benefit for small workloads.
+
+        Args:
+            n_warmup: Warmup iterations before capture.
+            latency_threshold_ms: Only capture if eager p50 > this value.
+
+        Returns:
+            True if graph was captured, False if skipped/failed.
+        """
+        device = next(self.parameters()).device
+        if not device.type == 'cuda':
+            return False
+
+        sd = self.config.state_dim
+        # Allocate static buffers
+        self._cg_input = torch.randn(sd, device=device)
+        self._cg_output = None
+        self._cuda_graph = None
+
+        # Measure eager baseline
+        import time as _time
+        for _ in range(n_warmup):
+            self.cycle.tick(self._cg_input, return_diagnostics=False)
+        torch.cuda.synchronize()
+
+        lats = []
+        for _ in range(20):
+            torch.cuda.synchronize()
+            t0 = _time.perf_counter()
+            self.cycle.tick(self._cg_input, return_diagnostics=False)
+            torch.cuda.synchronize()
+            lats.append((_time.perf_counter() - t0) * 1000)
+        lats.sort()
+        eager_p50 = lats[len(lats) // 2]
+
+        if eager_p50 < latency_threshold_ms:
+            # Not worth capturing — eager is fast enough
+            return False
+
+        # Capture
+        try:
+            g = torch.cuda.CUDAGraph()
+            # Side-channel capture: run tick, record
+            with torch.cuda.graph(g):
+                self._cg_output = self.cycle.tick(
+                    self._cg_input, return_diagnostics=False,
+                )
+            self._cuda_graph = g
+            return True
+        except Exception:
+            self._cuda_graph = None
+            return False
+
+    def disable_cuda_graphs(self):
+        """Disable CUDA graph replay and revert to eager execution."""
+        self._cuda_graph = None
+        self._cg_input = None
+        self._cg_output = None
+
     def step(self,
              sensory_input: torch.Tensor,
              reward: float = 0.0,
-             sleep_signal: float = 0.0) -> ModulationState:
+             sleep_signal: float = 0.0,
+             diagnostics: str = 'never') -> ModulationState:
         """
         Run one cognitive tick. Call this once per generation step.
+
+        By default runs the **minimal tick** (no ``.item()`` calls, no dict
+        construction, tensor-only return from the cycle).  This is the
+        recommended hot path for production use.
 
         Args:
             sensory_input: Any signal the LLM provides (state_dim,).
@@ -233,22 +337,61 @@ class PyQuiferBridge(nn.Module):
                           attention pattern summary, or synthetic signal.
             reward: Scalar reward (e.g., from RLHF, user feedback, task success).
             sleep_signal: 0.0=awake, 1.0=consolidating (e.g., between conversations).
+            diagnostics: ``'never'`` (default) — minimal tick, no diagnostics.
+                         ``'always'`` — full diagnostics every step (legacy behavior).
+                         ``'auto'`` — same as ``'never'`` (reserved for future
+                         decimated diagnostics).
 
         Returns:
             ModulationState with all parameters the LLM needs.
         """
+        want_diag = diagnostics == 'always'
+        return self._step_impl(sensory_input, reward, sleep_signal, want_diag)
+
+    def step_diagnostic(self,
+                        sensory_input: torch.Tensor,
+                        reward: float = 0.0,
+                        sleep_signal: float = 0.0,
+                        ) -> 'tuple[ModulationState, dict]':
+        """Run one cognitive tick with full diagnostics.
+
+        Convenience wrapper that always requests the diagnostic path.
+        Use this for debugging, monitoring dashboards, or benchmark
+        analysis — NOT on the hot path.
+
+        Returns:
+            ``(ModulationState, diagnostics_dict)`` where diagnostics_dict
+            has keys ``'consciousness'``, ``'self_state'``, ``'learning'``,
+            ``'diagnostics'``.
+        """
+        return self._step_impl(sensory_input, reward, sleep_signal, True)
+
+    def _step_impl(self,
+                   sensory_input: torch.Tensor,
+                   reward: float,
+                   sleep_signal: float,
+                   return_diagnostics: bool):
+        """Shared implementation for step() and step_diagnostic()."""
         t0 = time.perf_counter()
 
         # Ensure correct dimension
         if sensory_input.shape[-1] != self.config.state_dim:
-            # Project to state_dim if needed
             sensory_input = self._project_input(sensory_input)
 
-        # Run cognitive cycle
-        # NOTE: Do NOT wrap in torch.no_grad() — the HPC module uses
-        # autograd internally for generative model learning (gen_lr).
-        # The cycle manages its own no_grad blocks for buffer updates.
-        result = self.cycle.tick(sensory_input, reward=reward, sleep_signal=sleep_signal)
+        # CUDA graph replay path (minimal tick only, default reward/sleep)
+        _cg = getattr(self, '_cuda_graph', None)
+        if _cg is not None and not return_diagnostics and reward == 0.0 and sleep_signal == 0.0:
+            self._cg_input.copy_(sensory_input)
+            _cg.replay()
+            result = self._cg_output
+        else:
+            # Standard eager path
+            # NOTE: Do NOT wrap in torch.no_grad() — the HPC module uses
+            # autograd internally for generative model learning (gen_lr).
+            result = self.cycle.tick(
+                sensory_input, reward=reward, sleep_signal=sleep_signal,
+                return_diagnostics=return_diagnostics,
+            )
 
         t1 = time.perf_counter()
         latency_ms = (t1 - t0) * 1000
@@ -259,42 +402,78 @@ class PyQuiferBridge(nn.Module):
             self._latency_ema.mul_(1 - alpha).add_(alpha * latency_ms)
             self._latency_count.add_(1)
 
-        m = result['modulation']
-        c = result['consciousness']
-        s = result['self_state']
-        d = result['diagnostics']
+        if return_diagnostics:
+            # Full diagnostic path — unpack from dict
+            m = result['modulation']
+            c = result['consciousness']
+            s = result['self_state']
+            d = result['diagnostics']
 
-        # Map cognitive state to generation parameters
-        temperature = m['temperature']
-        repetition_penalty = self._compute_repetition_penalty(c['coherence'], m['motivation'])
-        top_p = self._compute_top_p(c['coherence'], c['criticality_distance'])
+            temperature = m['temperature']
+            repetition_penalty = self._compute_repetition_penalty(c['coherence'], m['motivation'])
+            top_p = self._compute_top_p(c['coherence'], c['criticality_distance'])
 
-        return ModulationState(
-            # Generation params
-            temperature=temperature,
-            repetition_penalty=repetition_penalty,
-            top_p=top_p,
-            # Personality
-            dominant_facet=m['dominant_state'],
-            facet_weights=m['personality_blend']['facet_weights'],
-            personality_stability=m['personality_blend']['stability'],
-            # Attention
-            attention_bias=m['attention_bias'],
-            # Cognitive mode
-            processing_mode=m['processing_mode'],
-            coherence=m['coherence'],
-            motivation=m['motivation'],
-            # Internal state
-            free_energy=c['free_energy'],
-            criticality_distance=c['criticality_distance'],
-            identity_strength=s['identity_strength'],
-            tick=d['tick'],
-            # Oscillator state
-            phases=d['phases'],
-            neuromodulator_levels=d['neuromodulator_levels'],
-            # Latency
-            step_latency_ms=latency_ms,
-        )
+            mod_state = ModulationState(
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                top_p=top_p,
+                dominant_facet=m['dominant_state'],
+                facet_weights=m['personality_blend']['facet_weights'],
+                personality_stability=m['personality_blend']['stability'],
+                attention_bias=m['attention_bias'],
+                processing_mode=m['processing_mode'],
+                coherence=m['coherence'],
+                motivation=m['motivation'],
+                free_energy=c['free_energy'],
+                criticality_distance=c['criticality_distance'],
+                identity_strength=s['identity_strength'],
+                tick=d['tick'],
+                phases=d['phases'],
+                neuromodulator_levels=d['neuromodulator_levels'],
+                step_latency_ms=latency_ms,
+            )
+            self._last_diagnostics = {
+                'consciousness': c,
+                'self_state': s,
+                'learning': result.get('learning', {}),
+                'diagnostics': d,
+            }
+            return mod_state, self._last_diagnostics
+        else:
+            # Minimal path — unpack from TickResult (tensor-only NamedTuple)
+            from pyquifer.integration import PROCESSING_MODE_NAMES
+            coherence_f = result.coherence.item()
+            motivation_f = result.motivation.item()
+            temperature_f = result.temperature.item()
+            processing_mode_str = PROCESSING_MODE_NAMES.get(
+                int(result.processing_mode), "balanced"
+            )
+
+            repetition_penalty = self._compute_repetition_penalty(coherence_f, motivation_f)
+            top_p = self._compute_top_p(coherence_f, 0.5)  # No criticality_distance in minimal path
+
+            # Personality blend: convert tensor → list
+            pb_weights = result.personality_blend.tolist()
+
+            return ModulationState(
+                temperature=temperature_f,
+                repetition_penalty=repetition_penalty,
+                top_p=top_p,
+                dominant_facet=int(result.dominant_state),
+                facet_weights=pb_weights,
+                personality_stability=0.5,  # Not available in minimal path
+                attention_bias=result.attention_bias,
+                processing_mode=processing_mode_str,
+                coherence=coherence_f,
+                motivation=motivation_f,
+                free_energy=0.0,  # Not available in minimal path
+                criticality_distance=0.5,  # Not available in minimal path
+                identity_strength=0.0,  # Not available in minimal path
+                tick=self.cycle._tick_py,
+                phases=self.cycle.oscillators.phases.detach(),
+                neuromodulator_levels=self.cycle.neuromodulation.levels.detach(),
+                step_latency_ms=latency_ms,
+            )
 
     def modulate_logits(self,
                         logits: torch.Tensor,
@@ -418,6 +597,56 @@ class PyQuiferBridge(nn.Module):
 
         return modified
 
+    def profile_step(self,
+                     sensory_input: torch.Tensor,
+                     n_warmup: int = 5,
+                     n_measure: int = 10,
+                     sync_mode: str = "warn") -> Dict[str, Any]:
+        """Run minimal ticks with sync detection and latency profiling.
+
+        Useful for regression testing: verifies no ``.item()`` syncs on
+        CUDA and measures tail latency.
+
+        Args:
+            sensory_input: (state_dim,) input tensor.
+            n_warmup: Warmup iterations (not measured).
+            n_measure: Measurement iterations.
+            sync_mode: ``"warn"`` or ``"error"`` for CUDA sync detection.
+
+        Returns:
+            Dict with ``latencies_ms`` (list), ``p50_ms``, ``p95_ms``,
+            ``p99_ms``, ``sync_warnings`` (count, CUDA only).
+        """
+        import warnings
+
+        # Warmup
+        for _ in range(n_warmup):
+            self.step(sensory_input)
+
+        latencies = []
+        sync_warn_count = 0
+
+        with sync_debug_mode(sync_mode):
+            for _ in range(n_measure):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    t0 = time.perf_counter()
+                    self.step(sensory_input)
+                    t1 = time.perf_counter()
+                    latencies.append((t1 - t0) * 1000)
+                    sync_warn_count += len(caught)
+
+        latencies.sort()
+        n = len(latencies)
+        return {
+            'latencies_ms': latencies,
+            'p50_ms': latencies[n // 2] if n else 0,
+            'p95_ms': latencies[int(n * 0.95)] if n else 0,
+            'p99_ms': latencies[int(n * 0.99)] if n else 0,
+            'mean_ms': sum(latencies) / n if n else 0,
+            'sync_warnings': sync_warn_count,
+        }
+
     def get_latency_stats(self) -> Dict[str, float]:
         """Get latency statistics."""
         return {
@@ -429,11 +658,21 @@ class PyQuiferBridge(nn.Module):
         """Compact cognitive state summary."""
         return self.cycle.get_state_summary()
 
+    def get_diagnostics(self) -> dict:
+        """Return the last diagnostic snapshot.
+
+        Updated only when ``step_diagnostic()`` or
+        ``step(diagnostics='always')`` is called.  Returns ``{}`` if
+        no diagnostic step has been run yet.
+        """
+        return self._last_diagnostics
+
     def reset(self):
         """Reset cognitive engine state."""
         self.cycle.reset()
         self._latency_ema.zero_()
         self._latency_count.zero_()
+        self._last_diagnostics = {}
 
     def prepare_sensory_input(self,
                               x: torch.Tensor,

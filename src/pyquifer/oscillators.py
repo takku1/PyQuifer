@@ -122,6 +122,10 @@ class LearnableKuramotoBank(nn.Module):
         self._cached_R: Optional[torch.Tensor] = None
         self._cached_Psi: Optional[torch.Tensor] = None
 
+        # Scratch buffers for sparse coupling (avoid per-tick allocation)
+        self.register_buffer('_scratch_norm', torch.zeros(num_oscillators))
+        self.register_buffer('_scratch_interaction', torch.zeros(num_oscillators))
+
         # Initialize adjacency matrix based on topology
         self._init_adjacency(topology, self.topology_params)
 
@@ -273,14 +277,14 @@ class LearnableKuramotoBank(nn.Module):
             ew = w * prec[dst]
             weighted = ew * sin_diffs
             # Per-row normalization: sum of precision-weighted edges
-            norm = torch.zeros(self.num_oscillators, device=ph.device)
+            norm = self._scratch_norm.zero_()
             norm.scatter_add_(0, src, ew)
-            interaction = torch.zeros(self.num_oscillators, device=ph.device)
+            interaction = self._scratch_interaction.zero_()
             interaction.scatter_add_(0, src, weighted)
             return interaction / norm.clamp(min=1e-8)
         else:
             weighted = w * sin_diffs
-            interaction = torch.zeros(self.num_oscillators, device=ph.device)
+            interaction = self._scratch_interaction.zero_()
             interaction.scatter_add_(0, src, weighted)
             return interaction / self._degree
 

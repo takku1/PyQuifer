@@ -272,9 +272,15 @@ __all__ = [
     # Integration (cognitive cycle)
     "CycleConfig",
     "CognitiveCycle",
+    "TickResult",
+    "PROCESSING_MODE_PERCEPTION",
+    "PROCESSING_MODE_IMAGINATION",
+    "PROCESSING_MODE_BALANCED",
+    "PROCESSING_MODE_NAMES",
     # Bridge (LLM modulation API)
     "PyQuiferBridge",
     "ModulationState",
+    "sync_debug_mode",
     # Volatility Filter (adaptive learning rates from HGF)
     "VolatilityNode",
     "HierarchicalVolatilityFilter",
@@ -746,9 +752,15 @@ _LAZY_IMPORTS = {
     # Integration
     "CycleConfig": (".integration", "CycleConfig"),
     "CognitiveCycle": (".integration", "CognitiveCycle"),
+    "TickResult": (".integration", "TickResult"),
+    "PROCESSING_MODE_PERCEPTION": (".integration", "PROCESSING_MODE_PERCEPTION"),
+    "PROCESSING_MODE_IMAGINATION": (".integration", "PROCESSING_MODE_IMAGINATION"),
+    "PROCESSING_MODE_BALANCED": (".integration", "PROCESSING_MODE_BALANCED"),
+    "PROCESSING_MODE_NAMES": (".integration", "PROCESSING_MODE_NAMES"),
 
     # Bridge
     "PyQuiferBridge": (".bridge", "PyQuiferBridge"),
+    "sync_debug_mode": (".bridge", "sync_debug_mode"),
 
     # Volatility Filter
     "VolatilityNode": (".volatility_filter", "VolatilityNode"),
