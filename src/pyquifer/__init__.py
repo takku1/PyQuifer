@@ -336,6 +336,118 @@ __all__ = [
     "StandingBroadcast",
     "CrossBleedGate",
     "WorkspaceEnsemble",
+    # Phase 11: ODE Solvers
+    "SolverConfig",
+    "EulerSolver",
+    "RK4Solver",
+    "DopriSolver",
+    "solve_ivp",
+    "create_solver",
+    # Phase 11: Complex Oscillators
+    "ComplexKuramotoBank",
+    "ComplexCoupling",
+    "ModReLU",
+    "ComplexLinear",
+    "ComplexBatchNorm",
+    "complex_order_parameter",
+    # Phase 11: CUDA Kernels
+    "KuramotoCUDAKernel",
+    "TensorDiagnostics",
+    # Phase 12: Visual Binding (AKOrN)
+    "AKOrNLayer",
+    "AKOrNBlock",
+    "AKOrNEncoder",
+    "OscillatorySegmenter",
+    "BindingReadout",
+    # Phase 12: Temporal Binding
+    "SequenceAKOrN",
+    "PhaseGrouping",
+    "OscillatoryChunking",
+    # Phase 12: Sensory Binding
+    "MultimodalBinder",
+    "BindingStrength",
+    "CrossModalAttention",
+    "ModalityEncoder",
+    # Phase 13: Deep Active Inference
+    "DeepAIF",
+    "LatentTransitionModel",
+    "PolicyNetwork",
+    "MultiStepPlanner",
+    # Phase 13: JEPA
+    "JEPAEncoder",
+    "JEPAPredictor",
+    "VICRegLoss",
+    "BarlowLoss",
+    "ActionJEPA",
+    # Phase 13: Deliberation
+    "Deliberator",
+    "ProcessRewardModel",
+    "BeamSearchReasoner",
+    "SelfCorrectionLoop",
+    "ComputeBudget",
+    # Phase 14: CLS Memory
+    "HippocampalModule",
+    "NeocorticalModule",
+    "ConsolidationScheduler",
+    "ForgettingCurve",
+    "ImportanceScorer",
+    "MemoryInterference",
+    # Phase 14: Temporal Knowledge Graph
+    "TemporalNode",
+    "TemporalEdge",
+    "TemporalKnowledgeGraph",
+    "EventTimeline",
+    "TemporalReasoner",
+    # Phase 14: Gated Memory
+    "NMDAGate",
+    "DifferentiableMemoryBank",
+    "MemoryConsolidationLoop",
+    # Phase 15: Cognitive Appraisal
+    "AppraisalDimension",
+    "AppraisalChain",
+    "OCC_Model",
+    "EmotionAttribution",
+    # Phase 15: Causal Reasoning
+    "CausalGraph",
+    "DoOperator",
+    "CounterfactualEngine",
+    "CausalDiscovery",
+    "InterventionalQuery",
+    # Phase 16: Selective SSM
+    "SelectiveStateSpace",
+    "SelectiveScan",
+    "SSMBlock",
+    "MambaLayer",
+    "OscillatorySSM",
+    # Phase 16: Oscillatory MoE
+    "ExpertPool",
+    "OscillatorRouter",
+    "SparseMoE",
+    # Phase 16: Graph Reasoning
+    "DynamicGraphAttention",
+    "MessagePassingWithPhase",
+    "TemporalGraphTransformer",
+    # Phase 17: Prospective Configuration
+    "ProspectiveInference",
+    "ProspectiveHebbian",
+    "InferThenModify",
+    # Phase 17: Dendritic Learning
+    "PyramidalNeuron",
+    "DendriticLocalizedLearning",
+    "DendriticErrorSignal",
+    # Phase 17: Energy Spiking PC
+    "EnergyOptimizedSNN",
+    "MultiCompartmentSpikingPC",
+    "EnergyLandscape",
+    # Phase 18: FHRR
+    "FHRREncoder",
+    "LatencyEncoder",
+    "SpikeVSAOps",
+    "NeuromorphicExporter",
+    # Phase 18: FlashRNN
+    "FlashLTC",
+    "FlashCfC",
+    "FlashLTCLayer",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -716,6 +828,140 @@ _LAZY_IMPORTS = {
     "StandingBroadcast": (".global_workspace", "StandingBroadcast"),
     "CrossBleedGate": (".global_workspace", "CrossBleedGate"),
     "WorkspaceEnsemble": (".global_workspace", "WorkspaceEnsemble"),
+
+    # Phase 11: ODE Solvers
+    "SolverConfig": (".ode_solvers", "SolverConfig"),
+    "EulerSolver": (".ode_solvers", "EulerSolver"),
+    "RK4Solver": (".ode_solvers", "RK4Solver"),
+    "DopriSolver": (".ode_solvers", "DopriSolver"),
+    "solve_ivp": (".ode_solvers", "solve_ivp"),
+    "create_solver": (".ode_solvers", "create_solver"),
+
+    # Phase 11: Complex Oscillators
+    "ComplexKuramotoBank": (".complex_oscillators", "ComplexKuramotoBank"),
+    "ComplexCoupling": (".complex_oscillators", "ComplexCoupling"),
+    "ModReLU": (".complex_oscillators", "ModReLU"),
+    "ComplexLinear": (".complex_oscillators", "ComplexLinear"),
+    "ComplexBatchNorm": (".complex_oscillators", "ComplexBatchNorm"),
+    "complex_order_parameter": (".complex_oscillators", "complex_order_parameter"),
+
+    # Phase 11: CUDA Kernels
+    "KuramotoCUDAKernel": ("._cuda.kuramoto_kernel", "KuramotoCUDAKernel"),
+    "TensorDiagnostics": ("._cuda.kuramoto_kernel", "TensorDiagnostics"),
+
+    # Phase 12: Visual Binding (AKOrN)
+    "AKOrNLayer": (".visual_binding", "AKOrNLayer"),
+    "AKOrNBlock": (".visual_binding", "AKOrNBlock"),
+    "AKOrNEncoder": (".visual_binding", "AKOrNEncoder"),
+    "OscillatorySegmenter": (".visual_binding", "OscillatorySegmenter"),
+    "BindingReadout": (".visual_binding", "BindingReadout"),
+
+    # Phase 12: Temporal Binding
+    "SequenceAKOrN": (".temporal_binding", "SequenceAKOrN"),
+    "PhaseGrouping": (".temporal_binding", "PhaseGrouping"),
+    "OscillatoryChunking": (".temporal_binding", "OscillatoryChunking"),
+
+    # Phase 12: Sensory Binding
+    "MultimodalBinder": (".sensory_binding", "MultimodalBinder"),
+    "BindingStrength": (".sensory_binding", "BindingStrength"),
+    "CrossModalAttention": (".sensory_binding", "CrossModalAttention"),
+    "ModalityEncoder": (".sensory_binding", "ModalityEncoder"),
+
+    # Phase 13: Deep Active Inference
+    "DeepAIF": (".deep_active_inference", "DeepAIF"),
+    "LatentTransitionModel": (".deep_active_inference", "LatentTransitionModel"),
+    "PolicyNetwork": (".deep_active_inference", "PolicyNetwork"),
+    "MultiStepPlanner": (".deep_active_inference", "MultiStepPlanner"),
+
+    # Phase 13: JEPA
+    "JEPAEncoder": (".jepa", "JEPAEncoder"),
+    "JEPAPredictor": (".jepa", "JEPAPredictor"),
+    "VICRegLoss": (".jepa", "VICRegLoss"),
+    "BarlowLoss": (".jepa", "BarlowLoss"),
+    "ActionJEPA": (".jepa", "ActionJEPA"),
+
+    # Phase 13: Deliberation
+    "Deliberator": (".deliberation", "Deliberator"),
+    "ProcessRewardModel": (".deliberation", "ProcessRewardModel"),
+    "BeamSearchReasoner": (".deliberation", "BeamSearchReasoner"),
+    "SelfCorrectionLoop": (".deliberation", "SelfCorrectionLoop"),
+    "ComputeBudget": (".deliberation", "ComputeBudget"),
+
+    # Phase 14: CLS Memory
+    "HippocampalModule": (".cls_memory", "HippocampalModule"),
+    "NeocorticalModule": (".cls_memory", "NeocorticalModule"),
+    "ConsolidationScheduler": (".cls_memory", "ConsolidationScheduler"),
+    "ForgettingCurve": (".cls_memory", "ForgettingCurve"),
+    "ImportanceScorer": (".cls_memory", "ImportanceScorer"),
+    "MemoryInterference": (".cls_memory", "MemoryInterference"),
+
+    # Phase 14: Temporal Knowledge Graph
+    "TemporalNode": (".temporal_graph", "TemporalNode"),
+    "TemporalEdge": (".temporal_graph", "TemporalEdge"),
+    "TemporalKnowledgeGraph": (".temporal_graph", "TemporalKnowledgeGraph"),
+    "EventTimeline": (".temporal_graph", "EventTimeline"),
+    "TemporalReasoner": (".temporal_graph", "TemporalReasoner"),
+
+    # Phase 14: Gated Memory
+    "NMDAGate": (".gated_memory", "NMDAGate"),
+    "DifferentiableMemoryBank": (".gated_memory", "DifferentiableMemoryBank"),
+    "MemoryConsolidationLoop": (".gated_memory", "MemoryConsolidationLoop"),
+
+    # Phase 15: Cognitive Appraisal
+    "AppraisalDimension": (".appraisal", "AppraisalDimension"),
+    "AppraisalChain": (".appraisal", "AppraisalChain"),
+    "OCC_Model": (".appraisal", "OCC_Model"),
+    "EmotionAttribution": (".appraisal", "EmotionAttribution"),
+
+    # Phase 15: Causal Reasoning
+    "CausalGraph": (".causal_reasoning", "CausalGraph"),
+    "DoOperator": (".causal_reasoning", "DoOperator"),
+    "CounterfactualEngine": (".causal_reasoning", "CounterfactualEngine"),
+    "CausalDiscovery": (".causal_reasoning", "CausalDiscovery"),
+    "InterventionalQuery": (".causal_reasoning", "InterventionalQuery"),
+
+    # Phase 16: Selective SSM
+    "SelectiveStateSpace": (".selective_ssm", "SelectiveStateSpace"),
+    "SelectiveScan": (".selective_ssm", "SelectiveScan"),
+    "SSMBlock": (".selective_ssm", "SSMBlock"),
+    "MambaLayer": (".selective_ssm", "MambaLayer"),
+    "OscillatorySSM": (".selective_ssm", "OscillatorySSM"),
+
+    # Phase 16: Oscillatory MoE
+    "ExpertPool": (".oscillatory_moe", "ExpertPool"),
+    "OscillatorRouter": (".oscillatory_moe", "OscillatorRouter"),
+    "SparseMoE": (".oscillatory_moe", "SparseMoE"),
+
+    # Phase 16: Graph Reasoning
+    "DynamicGraphAttention": (".graph_reasoning", "DynamicGraphAttention"),
+    "MessagePassingWithPhase": (".graph_reasoning", "MessagePassingWithPhase"),
+    "TemporalGraphTransformer": (".graph_reasoning", "TemporalGraphTransformer"),
+
+    # Phase 17: Prospective Configuration
+    "ProspectiveInference": (".prospective_config", "ProspectiveInference"),
+    "ProspectiveHebbian": (".prospective_config", "ProspectiveHebbian"),
+    "InferThenModify": (".prospective_config", "InferThenModify"),
+
+    # Phase 17: Dendritic Learning
+    "PyramidalNeuron": (".dendritic_learning", "PyramidalNeuron"),
+    "DendriticLocalizedLearning": (".dendritic_learning", "DendriticLocalizedLearning"),
+    "DendriticErrorSignal": (".dendritic_learning", "DendriticErrorSignal"),
+
+    # Phase 17: Energy Spiking PC
+    "EnergyOptimizedSNN": (".energy_spiking", "EnergyOptimizedSNN"),
+    "MultiCompartmentSpikingPC": (".energy_spiking", "MultiCompartmentSpikingPC"),
+    "EnergyLandscape": (".energy_spiking", "EnergyLandscape"),
+
+    # Phase 18: FHRR
+    "FHRREncoder": (".fhrr", "FHRREncoder"),
+    "LatencyEncoder": (".fhrr", "LatencyEncoder"),
+    "SpikeVSAOps": (".fhrr", "SpikeVSAOps"),
+    "NeuromorphicExporter": (".fhrr", "NeuromorphicExporter"),
+
+    # Phase 18: FlashRNN
+    "FlashLTC": (".flash_rnn", "FlashLTC"),
+    "FlashCfC": (".flash_rnn", "FlashCfC"),
+    "FlashLTCLayer": (".flash_rnn", "FlashLTCLayer"),
 }
 
 # Cache for loaded attributes

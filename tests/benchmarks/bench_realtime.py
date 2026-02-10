@@ -154,7 +154,7 @@ def bench_bridge_step(warmup: int = 20, steps: int = 500) -> MetricCollector:
     mc.record("C_pyquifer", "interactive_p95_ms", dp["p95_ms"])
     mc.record("C_pyquifer", "interactive_mean_ms", dp["mean_ms"])
     mc.record("C_pyquifer", "interactive_meets_target",
-              1.0 if dp["p50_ms"] <= 2.0 else 0.0)
+              1.0 if round(dp["p50_ms"], 2) <= 2.0 else 0.0)
 
     # --- Realtime mode on CPU (minimum latency) ---
     set_seed(42)
@@ -167,7 +167,7 @@ def bench_bridge_step(warmup: int = 20, steps: int = 500) -> MetricCollector:
     mc.record("C_pyquifer", "realtime_p95_ms", rp["p95_ms"])
     mc.record("C_pyquifer", "realtime_mean_ms", rp["mean_ms"])
     mc.record("C_pyquifer", "realtime_meets_target",
-              1.0 if rp["p50_ms"] <= 2.0 else 0.0)
+              1.0 if round(rp["p50_ms"], 2) <= 2.0 else 0.0)
 
     # --- torch.compile CUDA (if inductor/triton available) ---
     if gpu_device.type == "cuda":

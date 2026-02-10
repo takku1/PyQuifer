@@ -1243,7 +1243,8 @@ if __name__ == '__main__':
     target_r = torch.tensor(0.9)
 
     for epoch in range(10):
-        learnable_bank.phases.data = torch.rand(20) * 2 * math.pi
+        with torch.no_grad():
+            learnable_bank.phases.copy_(torch.rand(20) * 2 * math.pi)
         optimizer.zero_grad()
 
         phases = learnable_bank(steps=100)

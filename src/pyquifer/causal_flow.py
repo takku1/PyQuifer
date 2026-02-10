@@ -340,6 +340,9 @@ class DominanceDetector(nn.Module):
                              torch.zeros(buffer_size, num_levels))
         self.register_buffer('hist_ptr', torch.tensor(0))
 
+        # Python int mirror of hist_ptr — avoids GPU sync on every call
+        self._hist_ptr_py: int = 0
+
         # Dominance ratio
         self.register_buffer('dominance_ratio', torch.tensor(0.5))
 
@@ -361,16 +364,17 @@ class DominanceDetector(nn.Module):
             - mode: 'perception' or 'imagination'
         """
         with torch.no_grad():
-            idx = self.hist_ptr % self.buffer_size
+            idx = self._hist_ptr_py % self.buffer_size
             self.level_history[idx] = level_activations.detach()
             self.hist_ptr.add_(1)
+            self._hist_ptr_py += 1
 
-        n_valid = min(self.hist_ptr.item(), self.buffer_size)
+        n_valid = min(self._hist_ptr_py, self.buffer_size)
 
         bottom_up_te = torch.tensor(0.0, device=level_activations.device)
         top_down_te = torch.tensor(0.0, device=level_activations.device)
 
-        if n_valid >= 20 and self.hist_ptr % compute_every == 0:
+        if n_valid >= 20 and self._hist_ptr_py % compute_every == 0:
             series = self.level_history[:n_valid]
 
             # Sum TE from lower→higher levels (bottom-up)

@@ -133,6 +133,23 @@ class CycleConfig:
     use_phase_dominance: bool = False      # Oscillator phases → causal flow dominance
     use_motivation_priority: bool = False  # Motivation → memory consolidation priority
 
+    # Phase 11-18: New module feature flags
+    use_visual_binding: bool = False       # AKOrN visual segmentation
+    use_temporal_binding: bool = False     # SequenceAKOrN token binding
+    use_sensory_binding: bool = False      # Cross-modal phase-locked binding
+    use_deep_aif: bool = False             # Multi-step deep active inference
+    use_jepa_world_model: bool = False     # JEPA latent predictor
+    use_deliberation: bool = False         # Test-time compute / deliberation
+    use_cls_memory: bool = False           # Complementary learning systems
+    use_causal_reasoning: bool = False     # Causal graph / do-calculus
+    use_appraisal: bool = False            # Cognitive appraisal model
+    use_selective_ssm: bool = False        # Mamba-style selective SSM
+    use_oscillatory_moe: bool = False      # Oscillator-driven MoE routing
+    use_prospective_learning: bool = False # Prospective configuration learning
+    solver: str = "euler"                  # "euler", "rk4", "dopri5"
+    use_complex_oscillators: bool = False  # Complex z=A*exp(i*phi) backend
+    use_cuda_kernels: bool = False         # CUDA Kuramoto acceleration
+
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
@@ -218,7 +235,7 @@ def _criticality_feedback(
 
     Args:
         osc_phases: Oscillator phase buffer (num_oscillators,)
-        osc_coupling_data: coupling_strength.data (scalar tensor)
+        osc_coupling_data: coupling_strength parameter (scalar tensor, modified in-place)
         crit_sigma: Branching ratio σ from KuramotoCriticalityMonitor
         R_current: Instantaneous order parameter R
 
@@ -709,26 +726,41 @@ class CognitiveCycle(nn.Module):
              sensory_input: torch.Tensor,
              reward: float = 0.0,
              sleep_signal: float = 0.0,
+             return_diagnostics: bool = True,
              ) -> Dict[str, Any]:
         """
         Run one cognitive tick.
 
         Args:
-            sensory_input: Raw sensory input (state_dim,) or (batch, state_dim)
+            sensory_input: Raw sensory input, shape ``(state_dim,)`` or
+                           ``(1, state_dim)``.  Batch dim >1 is rejected.
+                           A ``(1, state_dim)`` input is squeezed automatically.
             reward: External reward signal (for motivation + memory priority)
             sleep_signal: 0.0 = awake, 1.0 = deep sleep (gates consolidation)
+            return_diagnostics: If False, skip building the heavy diagnostics
+                dict and most .item() conversions.  Returns only the modulation
+                parameters needed by the LLM bridge.  ~2x faster on GPU.
 
         Returns:
             Dict with:
             - modulation: Dict of LLM modulation parameters
-            - consciousness: Dict of consciousness metrics
-            - self_state: Dict of self-model state
-            - diagnostics: Dict of internal metrics for monitoring
+            - consciousness: Dict of consciousness metrics (if return_diagnostics)
+            - self_state: Dict of self-model state (if return_diagnostics)
+            - diagnostics: Dict of internal metrics (if return_diagnostics)
         """
         c = self.config
-        was_1d = sensory_input.dim() == 1
-        if was_1d:
-            sensory_input = sensory_input.unsqueeze(0)
+        # Enforce single-sample input — batched tick is not supported.
+        if sensory_input.dim() == 2:
+            if sensory_input.shape[0] != 1:
+                raise ValueError(
+                    f"tick() does not support batched input. "
+                    f"Expected (state_dim,) or (1, state_dim), got {sensory_input.shape}"
+                )
+            sensory_input = sensory_input.squeeze(0)
+        elif sensory_input.dim() != 1:
+            raise ValueError(
+                f"tick() expects 1-D input (state_dim,), got shape {sensory_input.shape}"
+            )
 
         device = sensory_input.device
 
@@ -737,7 +769,7 @@ class CognitiveCycle(nn.Module):
         # and coupling modulation (Lakatos et al. 2008; Fries 2005 CTC).
         # All modifications are within torch.no_grad — gradient flow from
         # the LLM to oscillators is severed by design.
-        sc = self._sensory_coupling(sensory_input[0], self.oscillators.phases)
+        sc = self._sensory_coupling(sensory_input, self.oscillators.phases)
 
         with torch.no_grad():
             # Phase reset: novel stimuli partially reset phases toward
@@ -751,9 +783,10 @@ class CognitiveCycle(nn.Module):
                 self.oscillators.phases.copy_(blended)
 
             # Coupling modulation: input salience scales K
-            self.oscillators.coupling_strength.data.mul_(
-                sc['coupling_scale']
-            ).clamp_(min=0.1, max=5.0)
+            with torch.no_grad():
+                self.oscillators.coupling_strength.mul_(
+                    sc['coupling_scale']
+                ).clamp_(min=0.1, max=5.0)
 
         # ── Step 1: Oscillator dynamics ──
         # Frequency entrainment: input energy shifts natural frequencies
@@ -783,7 +816,7 @@ class CognitiveCycle(nn.Module):
         circadian_plasticity = 1.0
         if self._circadian is not None:
             circ_result = self._circadian.step()
-            circadian_plasticity = circ_result['plasticity'].item() if isinstance(circ_result['plasticity'], torch.Tensor) else circ_result['plasticity']
+            circadian_plasticity = circ_result['plasticity']
             circadian_mode = circ_result.get('mode', 'wake')
             # Circadian rhythm modulates effective sleep signal
             if circadian_mode == 'sleep' and sleep_signal < 0.3:
@@ -839,7 +872,7 @@ class CognitiveCycle(nn.Module):
             _crit_fn = _compiled_criticality_feedback or _criticality_feedback
             _crit_fn(
                 self.oscillators.phases,
-                self.oscillators.coupling_strength.data,
+                self.oscillators.coupling_strength,
                 crit_sigma,
                 R_current,
             )
@@ -848,7 +881,7 @@ class CognitiveCycle(nn.Module):
         koopman_info = {}
         _koopman_result = None
         if self._koopman is not None:
-            _koopman_result = self._koopman(sensory_input[0].detach())
+            _koopman_result = self._koopman(sensory_input.detach())
 
         # ── Step 3: Neuromodulation ──
         # Update neuromodulator levels based on current signals
@@ -869,7 +902,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 4: Stochastic resonance ──
         if self._tick_py % c.step_every_sr == 0 or self._cached_sr is None:
             sr_result = self.stochastic_resonance(
-                sensory_input.squeeze(0) if was_1d else sensory_input[0],
+                sensory_input,
                 criticality_distance=criticality_distance,
             )
             self._cached_sr = sr_result
@@ -885,8 +918,8 @@ class CognitiveCycle(nn.Module):
             stp_result = self._stp(spike_proxy)
             stp_info = {
                 'stp_psp': stp_result['psp'].detach(),
-                'mean_facilitation': stp_result['u'].mean().item(),
-                'mean_depression': stp_result['x'].mean().item(),
+                'mean_facilitation': stp_result['u'].mean(),
+                'mean_depression': stp_result['x'].mean(),
             }
             # Modulate enhanced input by STP output
             enhanced_input = enhanced_input * stp_result['psp'].unsqueeze(0)
@@ -901,7 +934,7 @@ class CognitiveCycle(nn.Module):
             # Only use first hierarchy_dims[0] elements
             activity_for_gate = activity[:c.hierarchy_dims[0]]
             self._oscillation_gated(activity_for_gate, theta_phase)
-            theta_gate_value = self._oscillation_gated.gate_value.item()
+            theta_gate_value = self._oscillation_gated.gate_value
 
         # ── Step 5: Hierarchical Predictive Coding ──
         # Trim or pad input to match hierarchy bottom dimension
@@ -921,8 +954,8 @@ class CognitiveCycle(nn.Module):
         if self._oscillatory_predictive is not None:
             opc_result = self._oscillatory_predictive.learn(hpc_input, slow_phase=phases[0:1])
             opc_info = {
-                'gamma_power': opc_result['gamma_power'].item() if isinstance(opc_result['gamma_power'], torch.Tensor) else opc_result['gamma_power'],
-                'alpha_beta_power': opc_result['alpha_beta_power'].item() if isinstance(opc_result['alpha_beta_power'], torch.Tensor) else opc_result['alpha_beta_power'],
+                'gamma_power': opc_result['gamma_power'],
+                'alpha_beta_power': opc_result['alpha_beta_power'],
             }
 
         if self._tick_py % c.step_every_hpc == 0 or self._cached_hpc is None:
@@ -1005,7 +1038,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 8b: Global Workspace competition (if enabled) ──
         gw_info = {}
         if self.config.use_global_workspace and self._organs:
-            gw_info = self._run_workspace_competition(sensory_input[0], phases)
+            gw_info = self._run_workspace_competition(sensory_input, phases)
 
         # ── Step 8c: Multi-Workspace Ensemble (if enabled) ──
         ensemble_info = {}
@@ -1017,7 +1050,7 @@ class CognitiveCycle(nn.Module):
             contents_per_ws = []
             contexts_per_ws = []
             for wi in range(n_ws):
-                if wi == self._workspace_ensemble.active_idx.item() and gw_info:
+                if wi == int(self._workspace_ensemble.active_idx) and gw_info:
                     # Active workspace: use the same proposals from GW competition
                     # Repackage gw_info broadcast as content
                     bcast = gw_info.get('gw_broadcast', torch.zeros(ws_dim, device=device))
@@ -1072,12 +1105,12 @@ class CognitiveCycle(nn.Module):
             neural_mass_info = {
                 'E_states': nm_result['E_states'].detach(),
                 'I_states': nm_result['I_states'].detach(),
-                'nm_synchronization': nm_result['synchronization'].item(),
-                'nm_mean_E': nm_result['mean_E'].item(),
+                'nm_synchronization': nm_result['synchronization'],
+                'nm_mean_E': nm_result['mean_E'],
             }
 
         # ── Step 9: Neural darwinism ──
-        group_input = self.state_to_group(sensory_input[0])
+        group_input = self.state_to_group(sensory_input)
         # Global coherence from oscillator order parameter
         global_coherence_signal = self.state_to_group(
             self.phase_to_state(torch.sin(phases).unsqueeze(0)).squeeze(0)
@@ -1102,7 +1135,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 10: Motivation ──
         if self._tick_py % c.step_every_motivation == 0 or self._cached_motiv is None:
             motiv_result = self.motivation(
-                sensory_input[0],
+                sensory_input,
                 order_parameter=coherence.detach() if isinstance(coherence, torch.Tensor) else torch.tensor(coherence, device=device),
             )
             self._cached_motiv = motiv_result
@@ -1113,7 +1146,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 11: Self-model ──
         somatic_info = {}
         if self._tick_py % c.step_every_selfmodel == 0 or self._cached_self is None:
-            sensory_for_blanket = self.state_to_sensory(sensory_input[0])
+            sensory_for_blanket = self.state_to_sensory(sensory_input)
             blanket = self.markov_blanket(sensory_for_blanket)
 
             # Somatic → Self-Model wiring: enrich internal state with body signals
@@ -1157,7 +1190,7 @@ class CognitiveCycle(nn.Module):
             da_level = levels[0]
             self._three_factor.modulated_update(da_level)
             three_factor_info = {
-                'homeostatic_factor': self._three_factor.homeostatic_factor.mean().item(),
+                'homeostatic_factor': self._three_factor.homeostatic_factor.mean(),
             }
 
         # ── Step 11c: Dendritic credit assignment ──
@@ -1175,7 +1208,7 @@ class CognitiveCycle(nn.Module):
         # ── Step 12: Memory (consolidation if sleeping) ──
         # Store experience
         self.episodic_buffer.store(
-            sensory_input[0].detach(),
+            sensory_input.detach(),
             reward=reward + combined_motivation,
         )
 
@@ -1202,8 +1235,8 @@ class CognitiveCycle(nn.Module):
                     replay_rewards,
                 )
                 consolidation_info = {
-                    'consolidated': cons['consolidated'].item() if isinstance(cons['consolidated'], torch.Tensor) else cons['consolidated'],
-                    'num_traces': cons['num_traces'].item() if isinstance(cons['num_traces'], torch.Tensor) else cons['num_traces'],
+                    'consolidated': cons['consolidated'],
+                    'num_traces': cons['num_traces'],
                 }
 
             # SRC Hebbian sleep consolidation
@@ -1217,7 +1250,7 @@ class CognitiveCycle(nn.Module):
         ep_info = {}
         if self._ep_trainer is not None and self._tick_py % 10 == 0:
             # Use sensory input as external driving force (projected to oscillator dim)
-            ext = self.phase_to_state.weight.T @ sensory_input[0].detach()
+            ext = self.phase_to_state.weight.T @ sensory_input.detach()
             # Simple loss: maximize order parameter
             def _ep_loss(ph, _tgt):
                 complex_phases = torch.exp(1j * ph)
@@ -1233,14 +1266,14 @@ class CognitiveCycle(nn.Module):
         phase7_info = {}
         if self._no_progress is not None:
             np_result = self._no_progress(free_energy)
-            phase7_info['progress_stalled'] = np_result['progress_stalled'].item() if isinstance(np_result['progress_stalled'], torch.Tensor) else np_result['progress_stalled']
-            phase7_info['stagnation_duration'] = np_result['stagnation_duration'].item() if isinstance(np_result['stagnation_duration'], torch.Tensor) else np_result['stagnation_duration']
-            phase7_info['trend'] = np_result['trend'].item() if isinstance(np_result['trend'], torch.Tensor) else np_result['trend']
+            phase7_info['progress_stalled'] = np_result['progress_stalled']
+            phase7_info['stagnation_duration'] = np_result['stagnation_duration']
+            phase7_info['trend'] = np_result['trend']
 
         if self.config.use_attractor_stability and self._tick_py % 50 == 0:
             asi = self.oscillators.compute_attractor_stability(n_trials=5, recovery_steps=10)
-            phase7_info['attractor_stability'] = asi['stability_index'].item()
-            phase7_info['escape_probability'] = asi['escape_probability'].item()
+            phase7_info['attractor_stability'] = asi['stability_index']
+            phase7_info['escape_probability'] = asi['escape_probability']
 
         if self._phase_cache is not None:
             cached = self._phase_cache.query(self.oscillators.phases)
@@ -1268,18 +1301,38 @@ class CognitiveCycle(nn.Module):
             temperature = max(0.1, min(2.0, temperature))
 
         personality_blend = self._compute_personality_blend(
-            dominant_state_t.item() if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t,
-            narr_result['identity_strength'].item(),
+            int(dominant_state_t) if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t,
+            float(narr_result['identity_strength']),
             attractor_state=personality_info.get('personality_state', None),
         )
         attention_bias = attention_map.detach()
 
+        # ── Fast return path ──
+        # When return_diagnostics=False, skip all .item() conversions and
+        # dict construction.  Only return the modulation dict the bridge needs.
+        _coherence_f = float(coherence) if isinstance(coherence, torch.Tensor) else coherence
+        _dominant_state_f = int(dominant_state_t) if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
+        _comb_motiv_f = float(combined_motivation) if isinstance(combined_motivation, torch.Tensor) else combined_motivation
+
+        modulation = {
+            'temperature': temperature,
+            'personality_blend': personality_blend,
+            'attention_bias': attention_bias,
+            'processing_mode': processing_mode,
+            'coherence': _coherence_f,
+            'dominant_state': _dominant_state_f,
+            'motivation': _comb_motiv_f,
+            'sleep_signal': sleep_signal,
+        }
+
+        if not return_diagnostics:
+            return {'modulation': modulation}
+
         # ── Batch scalar extraction ──
-        # ALL .item() calls are grouped here to minimize GPU sync points.
+        # Most .item() calls are grouped here to minimize GPU sync points.
         # Each .item() forces a device sync on GPU; batching them at the
-        # end of the tick avoids ~25 individual syncs scattered through
+        # end of the tick avoids individual syncs scattered through
         # the computation path.
-        _coherence = coherence.item() if isinstance(coherence, torch.Tensor) else coherence
         _crit_dist = criticality_distance.item() if isinstance(criticality_distance, torch.Tensor) else criticality_distance
         _crit_br = crit_sigma.item() if isinstance(crit_sigma, torch.Tensor) else crit_sigma
         _crit_sus = crit['susceptibility'].item()
@@ -1305,8 +1358,6 @@ class CognitiveCycle(nn.Module):
         _coup_sc = sc['coupling_scale'].item() if isinstance(sc['coupling_scale'], torch.Tensor) else sc['coupling_scale']
         _dom_ratio = dominance_ratio.item() if isinstance(dominance_ratio, torch.Tensor) else dominance_ratio
         _coal_ent = coalition_entropy.item() if isinstance(coalition_entropy, torch.Tensor) else coalition_entropy
-        _dominant_state = dominant_state_t.item() if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
-        _comb_motiv = combined_motivation.item() if isinstance(combined_motivation, torch.Tensor) else combined_motivation
 
         if _sl_result is not None:
             stuart_landau_info = {
@@ -1328,19 +1379,10 @@ class CognitiveCycle(nn.Module):
             }
 
         return {
-            'modulation': {
-                'temperature': temperature,
-                'personality_blend': personality_blend,
-                'attention_bias': attention_bias,
-                'processing_mode': processing_mode,
-                'coherence': _coherence,
-                'dominant_state': _dominant_state,
-                'motivation': _comb_motiv,
-                'sleep_signal': sleep_signal,
-            },
+            'modulation': modulation,
             'consciousness': {
                 'free_energy': _fe,
-                'coherence': _coherence,
+                'coherence': _coherence_f,
                 'criticality_distance': _crit_dist,
                 'criticality_sigma': _crit_br,
                 'branching_ratio': _crit_br,
@@ -1363,7 +1405,7 @@ class CognitiveCycle(nn.Module):
                 'fitness_variance': _fit_var,
                 'num_memories': _n_mem,
                 'consolidation': consolidation_info,
-                'combined_motivation': _comb_motiv,
+                'combined_motivation': _comb_motiv_f,
                 'adaptive_lr': _adapt_lr,
                 'mean_volatility': _mean_vol,
             },
@@ -1582,7 +1624,7 @@ class CognitiveCycle(nn.Module):
         Fuses small tensor operations (sin, cos, clamp, mul, add) into
         fewer kernel launches.  On CPU, inductor generates C++/OpenMP loops.
         On CUDA, it generates fused Triton kernels or CUDA graphs.
-        Falls back to ``aot_eager`` on Windows when MSVC is unavailable.
+        Skips compilation on Windows when MSVC (cl.exe) is unavailable.
 
         Modules compiled:
         - oscillators (LearnableKuramotoBank) — Kuramoto dynamics

@@ -150,7 +150,8 @@ if __name__ == '__main__':
         optimizer.zero_grad()
         # Simulate the first bank (or all) to get its R
         # Resetting phases for each epoch for a clean start
-        freq_bank.banks[0].phases.data = torch.rand(freq_bank.banks[0].num_oscillators) * 2 * torch.pi
+        with torch.no_grad():
+            freq_bank.banks[0].phases.copy_(torch.rand(freq_bank.banks[0].num_oscillators) * 2 * torch.pi)
         freq_bank.banks[0](steps=20)
         current_r = freq_bank.banks[0].get_order_parameter()
         

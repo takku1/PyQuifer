@@ -417,7 +417,9 @@ def bench_cognitive_cycle(configs: List[Dict] = None, steps: int = 50,
             }},
         ]
 
-    device = get_device()
+    # Always measure on CPU (primary product target, consistent with bench_realtime).
+    # CUDA is measured separately in bench_realtime.py.
+    device = torch.device("cpu")
     mc = MetricCollector("CognitiveCycle.tick() Throughput")
 
     from pyquifer.integration import CognitiveCycle, CycleConfig

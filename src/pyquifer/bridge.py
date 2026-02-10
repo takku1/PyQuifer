@@ -1,10 +1,40 @@
 """
 PyQuifer Bridge: Clean API for plugging PyQuifer into any LLM.
 
-This is the external-facing interface. One class, three methods:
+This is the **canonical integration point** for Mizuki and any other
+LLM application.  All new integrations should use this module.
+
+One class, three methods:
   1. bridge.step(input) -> ModulationState
   2. bridge.modulate_logits(logits, state) -> modified_logits
   3. bridge.modulate_hidden(hidden, state) -> modified_hidden
+
+Canonical Call Path (Mizuki)
+----------------------------
+For per-token streaming (the primary production path)::
+
+    from pyquifer.bridge import PyQuiferBridge, SteppedModulator
+
+    # One-time setup
+    bridge = PyQuiferBridge.realtime()   # or .interactive() / .default()
+    stepper = SteppedModulator(bridge, step_every=8)
+
+    # Per-token loop
+    for token_embedding in stream:
+        sensory = bridge.prepare_sensory_input(token_embedding)
+        state = stepper.step(sensory)
+        logits = model(token_embedding)
+        logits = bridge.modulate_logits(logits, state)
+
+For non-streaming (one tick per turn)::
+
+    bridge = PyQuiferBridge.default()
+    state = bridge.step(sensory_input, return_diagnostics=False)
+    # Use state.temperature, state.top_p, state.repetition_penalty
+
+The older ``PyQuifer`` class (core.py) is the data-science API for
+standalone actualization/training.  ``PyQuiferBridge`` wraps the full
+``CognitiveCycle`` and is the correct entry point for LLM integration.
 
 The coupling equation (from design doc):
   Modified_Hidden = Original + A * sin(wt + phi) * Trait_Vector
@@ -19,15 +49,6 @@ IMPORTANT DESIGN CONSTRAINT:
   Oscillators evolve through their own physics (Kuramoto, PLL),
   NOT through backprop from the language model. The oscillators
   are the "soul" — the LLM is the "body."
-
-Usage:
-    from pyquifer.bridge import PyQuiferBridge
-
-    bridge = PyQuiferBridge.default()
-    for tokens in stream:
-        state = bridge.step(tokens.mean(dim=-1))
-        logits = model(tokens)
-        logits = bridge.modulate_logits(logits, state)
 
 References:
 - PyQuifer design doc: Modified_Hidden equation

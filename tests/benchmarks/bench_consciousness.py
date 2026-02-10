@@ -29,12 +29,11 @@ from harness import (
 # Lempel-Ziv Complexity
 # ---------------------------------------------------------------------------
 
-def lempel_ziv_complexity(binary_sequence: List[int]) -> float:
-    """Compute Lempel-Ziv complexity of a binary sequence.
-    Returns normalized complexity c(n) / (n / log2(n))."""
+def _raw_lz_complexity(binary_sequence: List[int]) -> int:
+    """Compute raw (unnormalized) Lempel-Ziv complexity of a binary sequence."""
     n = len(binary_sequence)
     if n <= 1:
-        return 0.0
+        return 0
     s = "".join(str(b) for b in binary_sequence)
     words = set()
     w = ""
@@ -47,9 +46,48 @@ def lempel_ziv_complexity(binary_sequence: List[int]) -> float:
             w = ""
     if w:
         complexity += 1
-    # Normalize by n / log2(n)
-    norm = n / max(math.log2(n), 1.0)
-    return complexity / norm
+    return complexity
+
+
+def lempel_ziv_complexity(binary_sequence: List[int],
+                          num_shuffles: int = 20) -> float:
+    """Compute normalized Lempel-Ziv complexity of a binary sequence.
+
+    Uses shuffle-based normalization (Casali et al. 2013): divide raw LZ
+    by the mean LZ of randomly shuffled versions of the same sequence.
+    This correctly accounts for sequence length and symbol frequency,
+    yielding values in [0, 1] where 1 = maximally complex for the given
+    statistics.  Falls back to theoretical n/log2(n) when n < 10.
+    """
+    import random as _random
+
+    n = len(binary_sequence)
+    if n <= 1:
+        return 0.0
+
+    raw = _raw_lz_complexity(binary_sequence)
+
+    # Degenerate: all same symbol → zero complexity
+    if len(set(binary_sequence)) <= 1:
+        return 0.0
+
+    if n < 10:
+        # Too short for reliable shuffle normalization
+        norm = n / max(math.log2(n), 1.0)
+        return raw / norm
+
+    # Shuffle-based normalization
+    shuffled_lzs = []
+    seq_copy = list(binary_sequence)
+    rng = _random.Random(42)
+    for _ in range(num_shuffles):
+        rng.shuffle(seq_copy)
+        shuffled_lzs.append(_raw_lz_complexity(seq_copy))
+
+    mean_shuffled = sum(shuffled_lzs) / len(shuffled_lzs)
+    if mean_shuffled < 1:
+        return 0.0
+    return raw / mean_shuffled
 
 
 def phase_to_binary(phases: torch.Tensor, threshold: float = math.pi) -> List[int]:
@@ -96,8 +134,13 @@ def bench_pci(num_ticks: int = 200, num_perturbations: int = 5,
         for _ in range(num_ticks):
             state_b = rand_net(state_b)
             phase_b.append(state_b.clone())
-        binary_b = phase_to_binary(torch.stack(phase_b))
-        pci_b_values.append(lempel_ziv_complexity(binary_b))
+        stacked_b = torch.stack(phase_b)  # (ticks, n_osc)
+        # Per-oscillator LZ, then average (consistent with C_pyquifer)
+        osc_lzs_b = []
+        for osc_i in range(stacked_b.shape[1]):
+            b_osc = phase_to_binary(stacked_b[:, osc_i])
+            osc_lzs_b.append(lempel_ziv_complexity(b_osc))
+        pci_b_values.append(sum(osc_lzs_b) / len(osc_lzs_b) if osc_lzs_b else 0.0)
     mc.record("B_pytorch", "pci_mean", round(sum(pci_b_values) / len(pci_b_values), 4))
 
     # Run baseline to settle dynamics
@@ -125,8 +168,14 @@ def bench_pci(num_ticks: int = 200, num_perturbations: int = 5,
 
         # Compute LZ complexity of phase response
         all_phases = torch.stack(phase_response)  # (ticks, n_osc)
-        binary = phase_to_binary(all_phases)
-        lz = lempel_ziv_complexity(binary)
+
+        # Per-oscillator PCI (comparable to published single-channel PCI):
+        # compute LZ per oscillator column, then average.
+        osc_lzs = []
+        for osc_i in range(all_phases.shape[1]):
+            b_osc = phase_to_binary(all_phases[:, osc_i])
+            osc_lzs.append(lempel_ziv_complexity(b_osc))
+        lz = sum(osc_lzs) / len(osc_lzs) if osc_lzs else 0.0
         pci_values.append(lz)
 
         # Restore phases
@@ -136,7 +185,8 @@ def bench_pci(num_ticks: int = 200, num_perturbations: int = 5,
     mean_pci = sum(pci_values) / len(pci_values) if pci_values else 0.0
     std_pci = (sum((v - mean_pci) ** 2 for v in pci_values) / max(len(pci_values) - 1, 1)) ** 0.5
 
-    mc.record("C_pyquifer", "pci_mean", round(mean_pci, 4))
+    mc.record("C_pyquifer", "pci_mean", round(mean_pci, 4),
+              {"note": "Per-oscillator LZ average (comparable to single-channel PCI)"})
     mc.record("C_pyquifer", "pci_std", round(std_pci, 4))
     mc.record("C_pyquifer", "pci_target_min", 0.31,
               {"note": "PCI > 0.31 indicates conscious processing"})

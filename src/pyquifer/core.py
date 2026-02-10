@@ -1,14 +1,13 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import pandas as pd
 from typing import Optional, Union, Dict, Any, List, Callable, Literal
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-from sklearn.decomposition import PCA
 
 from .models import GenerativeWorldModel
 from .frequency_bank import FrequencyBank
 import logging
+
+logger = logging.getLogger(__name__)
 
 class PyQuifer(nn.Module):
     """
@@ -76,7 +75,7 @@ class PyQuifer(nn.Module):
         self._raw_data_storage: Optional[Any] = None
         self._processed_data_storage: Optional[torch.Tensor] = None
         self._dim_reduction = dim_reduction
-        self._pca_model: Optional[PCA] = None
+        self._pca_model: Optional[Any] = None
 
         # Viscosity Control parameters
         self._viscosity_control_enabled = viscosity_control_enabled
@@ -86,11 +85,18 @@ class PyQuifer(nn.Module):
         self._kuramoto_threshold = kuramoto_threshold
         self._kuramoto_callback: Optional[Callable[[float, int, str], None]] = None # Callback (R, cycle/epoch, context)
 
-    def _preprocess_data(self, data: Union[pd.DataFrame, np.ndarray, List[Dict]], is_training_data: bool = True) -> np.ndarray:
+    def _preprocess_data(self, data, is_training_data: bool = True) -> np.ndarray:
         """
         Internal method for data preparation and feature mapping - the 'Automated Sieve'.
         Scans, maps, and scales data to fit the model's space_dim.
+
+        Args:
+            data: pd.DataFrame, np.ndarray, or List[Dict]
         """
+        import pandas as pd
+        from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+        from sklearn.decomposition import PCA
+
         if isinstance(data, list):
             # Attempt to convert list of dicts to DataFrame
             data = pd.DataFrame(data)
@@ -209,13 +215,13 @@ class PyQuifer(nn.Module):
         logger.info(f"Viscosity Control: Adjusted actualization_strength to {new_actualization_strength:.4f} "
               f"based on data variance ({data_variance:.4f}).")
 
-    def ingest_data(self, data: Union[pd.DataFrame, np.ndarray, List[Dict]], feature_mapping: Optional[Dict[str, str]] = None):
+    def ingest_data(self, data, feature_mapping: Optional[Dict[str, str]] = None):
         """
         Ingests raw data into the PyQuifer system. This method now utilizes the 'Automated Sieve'
         for preparing the data and triggers 'Viscosity Control'.
 
         Args:
-            data (Union[pd.DataFrame, np.ndarray, List[Dict]]): The raw input data.
+            data: pd.DataFrame, np.ndarray, or List[Dict] — the raw input data.
             feature_mapping (dict, optional): Manual mapping of raw features to
                                               PyQuifer's internal dimensions/concepts.
                                               The 'Sieve' aims to automate this, but explicit
@@ -305,7 +311,7 @@ class PyQuifer(nn.Module):
         }
 
     def fit(self,
-            data: Union[pd.DataFrame, np.ndarray, List[Dict]],
+            data,
             target_archetype_value: Union[np.ndarray, List[float], torch.Tensor],
             input_noise_shape: tuple,
             learning_epochs: int = 50,
@@ -318,7 +324,7 @@ class PyQuifer(nn.Module):
         to converge towards a target value. This demonstrates the 'learning' aspect.
 
         Args:
-            data (Union[pd.DataFrame, np.ndarray, List[Dict]]): Data to be ingested for training.
+            data: pd.DataFrame, np.ndarray, or List[Dict] — data to be ingested for training.
             target_archetype_value (Union[np.ndarray, List[float], torch.Tensor]): The target
                                                                                    3D vector the archetype
                                                                                    should learn.
@@ -433,8 +439,6 @@ class PyQuifer(nn.Module):
             return {"kuramoto_order_parameter": self.model.frequency_bank.get_aggregated_order_parameter()}
         return {}
 
-
-logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
