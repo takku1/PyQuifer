@@ -29,6 +29,7 @@ References:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 import logging
 from typing import Optional, Dict, Any, List
@@ -595,6 +596,158 @@ class CognitiveCycle(nn.Module):
                 manifold_dim=min(c.internal_dim, 8),
             )
 
+        # === Phase 11-18: New Module Wiring ===
+        # Each flag gates a lazy import + instantiation.
+        # Modules are called in tick() at the appropriate pipeline stage.
+
+        # Phase 11: ODE solver (used by oscillators if not euler)
+        self._ode_solver = None
+        if c.solver != "euler":
+            from pyquifer.ode_solvers import SolverConfig
+            solver_map = {"rk4": "rk4", "dopri5": "dopri", "dopri": "dopri"}
+            method = solver_map.get(c.solver, "rk4")
+            self._ode_solver = SolverConfig(method=method)
+
+        # Phase 11: Complex oscillator backend
+        self._complex_oscillators = None
+        if c.use_complex_oscillators:
+            from pyquifer.complex_oscillators import ComplexKuramotoBank
+            self._complex_oscillators = ComplexKuramotoBank(
+                num_oscillators=c.num_oscillators,
+                dt=c.oscillator_dt,
+                integration_method=c.integration_method,
+            )
+
+        # Phase 11: CUDA kernel acceleration
+        self._cuda_kernel = None
+        if c.use_cuda_kernels:
+            try:
+                from pyquifer._cuda.kuramoto_kernel import KuramotoCUDAKernel
+                self._cuda_kernel = KuramotoCUDAKernel(use_triton=True)
+            except Exception as e:
+                logger.warning("CUDA kernel init failed: %s — falling back to PyTorch", e)
+
+        # Phase 12: Visual binding (AKOrN)
+        self._visual_binding = None
+        if c.use_visual_binding:
+            from pyquifer.visual_binding import AKOrNEncoder
+            self._visual_binding = AKOrNEncoder(
+                dim=c.state_dim, depth=2, num_heads=4,
+            )
+
+        # Phase 12: Temporal binding (sequence AKOrN)
+        self._temporal_binding = None
+        if c.use_temporal_binding:
+            from pyquifer.temporal_binding import SequenceAKOrN
+            self._temporal_binding = SequenceAKOrN(
+                dim=c.state_dim, num_heads=4,
+            )
+
+        # Phase 12: Sensory binding (cross-modal)
+        self._sensory_binding = None
+        if c.use_sensory_binding:
+            from pyquifer.sensory_binding import MultimodalBinder
+            self._sensory_binding = MultimodalBinder(
+                modality_dims={"default": c.state_dim},
+                binding_dim=c.state_dim,
+                num_oscillators_per_modality=min(c.num_oscillators, 16),
+            )
+
+        # Phase 13: Deep active inference
+        self._deep_aif = None
+        if c.use_deep_aif:
+            from pyquifer.deep_active_inference import DeepAIF
+            self._deep_aif = DeepAIF(
+                obs_dim=c.state_dim,
+                latent_dim=c.belief_dim,
+                action_dim=4,  # Abstract action space
+                horizon=5,
+            )
+
+        # Phase 13: JEPA world model
+        self._jepa = None
+        if c.use_jepa_world_model:
+            from pyquifer.jepa import ActionJEPA
+            self._jepa = ActionJEPA(
+                obs_dim=c.state_dim,
+                action_dim=4,
+                latent_dim=c.belief_dim,
+            )
+
+        # Phase 13: Deliberation (test-time compute)
+        self._deliberator = None
+        if c.use_deliberation:
+            from pyquifer.deliberation import Deliberator
+            self._deliberator = Deliberator(
+                dim=c.state_dim,
+                min_steps=4,
+                max_steps=16,
+                beam_width=2,
+            )
+
+        # Phase 14: Complementary learning systems
+        self._hippocampal = None
+        self._neocortical = None
+        if c.use_cls_memory:
+            from pyquifer.cls_memory import HippocampalModule, NeocorticalModule
+            self._hippocampal = HippocampalModule(
+                dim=c.state_dim,
+                capacity=c.episodic_capacity,
+            )
+            self._neocortical = NeocorticalModule(
+                dim=c.state_dim,
+                schema_dim=c.semantic_dim,
+                num_schemas=c.semantic_slots,
+            )
+
+        # Phase 15: Causal reasoning
+        self._causal_graph = None
+        if c.use_causal_reasoning:
+            from pyquifer.causal_reasoning import CausalGraph, DoOperator
+            self._causal_graph = CausalGraph()
+            self._do_operator = DoOperator(
+                dim=c.state_dim,
+                num_variables=len(c.hierarchy_dims),
+            )
+
+        # Phase 15: Cognitive appraisal
+        self._appraisal = None
+        if c.use_appraisal:
+            from pyquifer.appraisal import AppraisalChain, OCC_Model
+            self._appraisal = AppraisalChain(dim=c.state_dim)
+            self._occ_model = OCC_Model()
+
+        # Phase 16: Selective SSM (oscillatory)
+        self._selective_ssm = None
+        if c.use_selective_ssm:
+            from pyquifer.selective_ssm import OscillatorySSM
+            self._selective_ssm = OscillatorySSM(
+                d_model=c.state_dim,
+                d_state=16,
+                num_oscillators=min(c.num_oscillators, 8),
+            )
+
+        # Phase 16: Oscillatory MoE
+        self._oscillatory_moe = None
+        if c.use_oscillatory_moe:
+            from pyquifer.oscillatory_moe import SparseMoE
+            self._oscillatory_moe = SparseMoE(
+                d_model=c.state_dim,
+                num_experts=4,
+                top_k=2,
+                num_oscillator_features=min(c.num_oscillators, 8),
+            )
+
+        # Phase 17: Prospective configuration learning
+        self._prospective = None
+        if c.use_prospective_learning:
+            from pyquifer.prospective_config import InferThenModify
+            self._prospective = InferThenModify(
+                dims=c.hierarchy_dims,
+                num_inference_steps=10,
+                modification_lr=0.01,
+            )
+
         # === Projection layers (bridge mismatched dimensions) ===
         # Project oscillator phases to state_dim for various modules
         self.phase_to_state = nn.Linear(c.num_oscillators, c.state_dim, bias=False)
@@ -799,6 +952,21 @@ class CognitiveCycle(nn.Module):
         # Keep as tensor — .item() deferred to batch extraction block at end
         coherence = order_param if isinstance(order_param, torch.Tensor) else torch.tensor(order_param, device=device)
 
+        # ── Step 1a2: Complex oscillator backend (parallel to real-valued) ──
+        complex_osc_info = {}
+        if self._complex_oscillators is not None:
+            complex_phases = self._complex_oscillators(
+                external_input=sc['freq_modulation'][:self._complex_oscillators.num_oscillators]
+                if sc['freq_modulation'].shape[0] >= self._complex_oscillators.num_oscillators
+                else None,
+                steps=1,
+            )
+            complex_R = self._complex_oscillators.get_order_parameter()
+            complex_osc_info = {
+                'complex_R': complex_R.detach(),
+                'complex_phases': self._complex_oscillators.get_phases().detach(),
+            }
+
         # ── Step 1b: Optional Stuart-Landau oscillator ──
         stuart_landau_info = {}
         _sl_result = None
@@ -935,6 +1103,45 @@ class CognitiveCycle(nn.Module):
             activity_for_gate = activity[:c.hierarchy_dims[0]]
             self._oscillation_gated(activity_for_gate, theta_phase)
             theta_gate_value = self._oscillation_gated.gate_value
+
+        # ── Step 4d: Phase 12 — Perceptual binding (if enabled) ──
+        binding_info = {}
+        if self._visual_binding is not None:
+            # AKOrN needs (B, N, D) — treat input as single-token sequence
+            vb_input = enhanced_input.view(1, 1, -1)
+            vb_out = self._visual_binding(vb_input)
+            # Squeeze back to 1D (D,) for tick() pipeline
+            enhanced_input = vb_out.view(-1)
+            binding_info['visual_binding_applied'] = True
+
+        if self._temporal_binding is not None:
+            tb_input = enhanced_input.view(1, 1, -1)
+            tb_out = self._temporal_binding(tb_input)
+            enhanced_input = tb_out.view(-1)
+            binding_info['temporal_binding_applied'] = True
+
+        if self._sensory_binding is not None:
+            sb_input = enhanced_input.squeeze(0) if enhanced_input.dim() > 1 else enhanced_input
+            sb_result = self._sensory_binding({'default': sb_input.unsqueeze(0)})
+            binding_info['total_binding'] = sb_result['total_binding'].detach()
+
+        # ── Step 4e: Phase 16 — Selective SSM / MoE (if enabled) ──
+        ssm_moe_info = {}
+        if self._selective_ssm is not None:
+            ssm_input = enhanced_input.view(1, 1, -1)
+            # Trim phases to SSM's num_oscillators
+            ssm_phases = phases[:self._selective_ssm.num_oscillators]
+            ssm_out = self._selective_ssm(ssm_input, phases=ssm_phases)
+            enhanced_input = ssm_out.view(-1)
+            ssm_moe_info['ssm_applied'] = True
+
+        if self._oscillatory_moe is not None:
+            moe_input = enhanced_input.view(1, 1, -1)
+            n_osc_feat = self._oscillatory_moe.router.osc_gate[0].in_features
+            osc_state = torch.sin(phases[:n_osc_feat])
+            moe_result = self._oscillatory_moe(moe_input, oscillator_state=osc_state)
+            enhanced_input = moe_result['output'].view(-1)
+            ssm_moe_info['moe_balance_loss'] = moe_result['balance_loss'].detach()
 
         # ── Step 5: Hierarchical Predictive Coding ──
         # Trim or pad input to match hierarchy bottom dimension
@@ -1143,6 +1350,33 @@ class CognitiveCycle(nn.Module):
             motiv_result = self._cached_motiv
         combined_motivation = motiv_result['motivation']  # keep tensor
 
+        # ── Step 10b: Phase 15 — Cognitive appraisal (if enabled) ──
+        appraisal_info = {}
+        if self._appraisal is not None:
+            appr_result = self._appraisal(sensory_input)
+            occ_input = torch.stack([
+                v['value'] for v in appr_result.values()
+            ]).unsqueeze(0)  # (1, num_dims)
+            occ_result = self._occ_model(occ_input)
+            appraisal_info = {
+                'dominant_emotion': occ_result['dominant_emotion'].detach(),
+                'valence': occ_result['valence'].detach(),
+                'arousal': occ_result['arousal'].detach(),
+            }
+
+        # ── Step 10c: Phase 13 — Deliberation (if enabled) ──
+        deliberation_info = {}
+        if self._deliberator is not None:
+            coherence_f = float(coherence) if isinstance(coherence, torch.Tensor) else coherence
+            delib_result = self._deliberator(
+                sensory_input.unsqueeze(0),
+                coherence=coherence_f,
+            )
+            deliberation_info = {
+                'deliberation_confidence': delib_result['confidence'].detach(),
+                'deliberation_corrections': delib_result['corrections_made'].detach(),
+            }
+
         # ── Step 11: Self-model ──
         somatic_info = {}
         if self._tick_py % c.step_every_selfmodel == 0 or self._cached_self is None:
@@ -1245,6 +1479,87 @@ class CognitiveCycle(nn.Module):
                 src_info = {
                     'src_delta_norm': sum(src_result['weight_delta_norms']) / len(src_result['weight_delta_norms']),
                 }
+
+        # ── Step 12b: Phase 14 — CLS memory (if enabled) ──
+        cls_info = {}
+        if self._hippocampal is not None:
+            # Store in hippocampus (fast episodic)
+            importance = abs(reward) + float(combined_motivation)
+            self._hippocampal.store(
+                sensory_input.detach(),
+                importance=min(1.0, importance),
+                novelty=float(sc['input_novelty']) if isinstance(sc['input_novelty'], torch.Tensor) else sc['input_novelty'],
+            )
+            cls_info['hippocampal_count'] = self._hippocampal.num_stored.item()
+
+            # Consolidate to neocortex during sleep
+            if sleep_signal > 0.3 and self._neocortical is not None:
+                recall = self._hippocampal.recall(sensory_input.detach(), top_k=10)
+                if recall['memories'].shape[0] > 0:
+                    neo_result = self._neocortical.consolidate(recall['memories'])
+                    cls_info['neocortical_updated'] = neo_result['num_updated']
+
+        # ── Step 12c: Phase 15 — Causal reasoning (if enabled) ──
+        causal_info = {}
+        if self._causal_graph is not None and self._do_operator is not None:
+            # Propagate causal influence through hierarchy levels
+            # Errors have different dims per level — pad to max before stacking
+            max_err_dim = max(err.shape[-1] for err in hpc_result['errors'])
+            level_embeds = torch.stack([
+                F.pad(err.detach(), (0, max_err_dim - err.shape[-1]))
+                for err in hpc_result['errors']
+            ])  # (n_levels, max_err_dim)
+            # Pad/trim to state_dim for DoOperator
+            if level_embeds.shape[-1] < c.state_dim:
+                level_embeds = torch.nn.functional.pad(
+                    level_embeds, (0, c.state_dim - level_embeds.shape[-1])
+                )
+            elif level_embeds.shape[-1] > c.state_dim:
+                level_embeds = level_embeds[..., :c.state_dim]
+            # Simple adjacency: each level feeds into the next
+            n_lev = level_embeds.shape[0]
+            adj = torch.zeros(n_lev, n_lev, device=device)
+            for i in range(n_lev - 1):
+                adj[i, i + 1] = 1.0
+            propagated = self._do_operator.propagate(level_embeds, adj)
+            causal_info['causal_propagation_norm'] = propagated.norm().detach()
+
+        # ── Step 12d: Phase 13 — JEPA world model (if enabled) ──
+        jepa_info = {}
+        if self._jepa is not None and self._tick_py % 5 == 0:
+            # JEPA predicts next latent from current state
+            jepa_obs = sensory_input.detach().unsqueeze(0)
+            dummy_action = torch.zeros(1, 4, device=device)
+            jepa_pred = self._jepa.imagine(jepa_obs, dummy_action.unsqueeze(1))
+            jepa_info['jepa_pred_norm'] = jepa_pred.norm().detach()
+
+        # ── Step 12e: Phase 13 — Deep active inference (if enabled) ──
+        deep_aif_info = {}
+        if self._deep_aif is not None and self._tick_py % 10 == 0:
+            aif_result = self._deep_aif.act(
+                sensory_input.detach().unsqueeze(0),
+                use_planner=False,
+                deterministic=True,
+            )
+            deep_aif_info = {
+                'aif_efe': aif_result['efe'].detach(),
+                'aif_epistemic': aif_result['epistemic_value'].detach(),
+            }
+
+        # ── Step 12f: Phase 17 — Prospective learning (if enabled) ──
+        prospective_info = {}
+        if self._prospective is not None and self._tick_py % 5 == 0:
+            prosp_input = hpc_input.squeeze(0) if hpc_input.dim() > 1 else hpc_input
+            prosp_target = top_beliefs.squeeze(0) if top_beliefs.dim() > 1 else top_beliefs
+            # Pad/trim target to match prospective output dim
+            out_dim = c.hierarchy_dims[-1]
+            if prosp_target.shape[-1] != out_dim:
+                prosp_target = prosp_target[..., :out_dim] if prosp_target.shape[-1] > out_dim else torch.nn.functional.pad(prosp_target, (0, out_dim - prosp_target.shape[-1]))
+            prosp_result = self._prospective.learn(prosp_input, prosp_target)
+            prospective_info = {
+                'prospective_improvement': prosp_result['improvement'],  # already float from .item()
+                'prospective_loss': prosp_result['loss'].detach(),
+            }
 
         # EP training (periodically, not every tick)
         ep_info = {}
@@ -1444,6 +1759,16 @@ class CognitiveCycle(nn.Module):
                 'input_novelty': sc['input_novelty'],
                 'phase_reset_strength': _reset_s,
                 'coupling_scale': _coup_sc,
+                **complex_osc_info,
+                **binding_info,
+                **ssm_moe_info,
+                **appraisal_info,
+                **deliberation_info,
+                **cls_info,
+                **causal_info,
+                **jepa_info,
+                **deep_aif_info,
+                **prospective_info,
             },
         }
 
@@ -1574,6 +1899,14 @@ class CognitiveCycle(nn.Module):
         if self._evidence_aggregator is not None:
             self._evidence_aggregator.clear()
         # Phase cache is not reset (accumulated knowledge persists)
+
+        # Phase 11-18 optional modules
+        if self._complex_oscillators is not None:
+            self._complex_oscillators.reset()
+        if self._hippocampal is not None:
+            self._hippocampal.reset()
+        if self._neocortical is not None:
+            self._neocortical.reset()
 
     @staticmethod
     def _detect_compile_backend(preferred: str, device: str = "cpu") -> str:

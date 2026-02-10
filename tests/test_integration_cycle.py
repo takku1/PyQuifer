@@ -149,3 +149,44 @@ class TestCognitiveCycle:
         assert 'dominant_facet' in blend
         assert len(blend['facet_weights']) == cycle.config.num_populations
         assert abs(sum(blend['facet_weights']) - 1.0) < 1e-5
+
+    def test_return_diagnostics_false(self, cycle):
+        """return_diagnostics=False returns only modulation dict."""
+        sensory = torch.randn(cycle.config.state_dim)
+        result = cycle.tick(sensory, return_diagnostics=False)
+        assert 'modulation' in result
+        assert len(result) == 1, f"Expected only 'modulation', got {list(result.keys())}"
+        m = result['modulation']
+        assert 'temperature' in m
+        assert 0.0 <= m['temperature'] <= 2.0
+
+    def test_batch_input_rejected(self, cycle):
+        """2D input with batch > 1 should raise ValueError."""
+        batched = torch.randn(3, cycle.config.state_dim)
+        with pytest.raises(ValueError, match="does not support batched input"):
+            cycle.tick(batched)
+
+    def test_single_batch_input_accepted(self, cycle):
+        """2D input with batch=1 should be squeezed and accepted."""
+        single_batch = torch.randn(1, cycle.config.state_dim)
+        result = cycle.tick(single_batch)
+        assert 'modulation' in result
+
+    @pytest.mark.parametrize("flag", [
+        'use_visual_binding',
+        'use_temporal_binding',
+        'use_selective_ssm',
+        'use_oscillatory_moe',
+        'use_causal_reasoning',
+        'use_cls_memory',
+        'use_prospective_learning',
+    ])
+    def test_phase11_18_flags_tick(self, flag):
+        """Each Phase 11-18 flag should produce a valid tick() result."""
+        kwargs = {flag: True, 'state_dim': 32, 'num_oscillators': 16,
+                  'hierarchy_dims': [32, 16, 8]}
+        cfg = CycleConfig(**kwargs)
+        cycle = CognitiveCycle(cfg)
+        result = cycle.tick(torch.randn(32))
+        assert 'modulation' in result
+        assert 'diagnostics' in result
