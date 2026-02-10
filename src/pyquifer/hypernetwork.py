@@ -16,7 +16,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Dict, List, Tuple, Union
+from enum import Enum
+from typing import Optional, Dict, List, Literal, Tuple, Union
+
+
+class InputEncoding(Enum):
+    """Input encoding mode for hypernetwork context (from hyperlight patterns)."""
+    IDENTITY = 'identity'       # Pass through unchanged
+    COS_SIN = 'cos_sin'         # Concatenate [cos(x), sin(x)] — doubles dim, adds frequency info
+    NORMALIZED = 'normalized'   # L2-normalize input
+
+
+def encode_input(x: torch.Tensor, mode: InputEncoding) -> torch.Tensor:
+    """Apply input encoding to context vector before hypernetwork processing."""
+    if mode == InputEncoding.IDENTITY:
+        return x
+    elif mode == InputEncoding.COS_SIN:
+        return torch.cat([torch.cos(x), torch.sin(x)], dim=-1)
+    elif mode == InputEncoding.NORMALIZED:
+        return F.normalize(x, dim=-1)
+    else:
+        return x
 
 
 class HyperNetwork(nn.Module):
@@ -73,10 +93,27 @@ class HyperNetwork(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize with small weights for stable training."""
-        for head in self.param_heads.values():
-            nn.init.normal_(head.weight, std=0.01)
-            nn.init.zeros_(head.bias)
+        """Initialize heads with parameter-type-aware init (from hyperlight patterns).
+
+        Weight heads get Xavier-scaled init, bias heads get near-zero init.
+        This prevents magnitude mismatch between weight and bias parameters.
+        """
+        for safe_name, head in self.param_heads.items():
+            original_name = self._name_mapping.get(safe_name, safe_name)
+            if 'bias' in original_name:
+                # Bias heads: near-zero output
+                nn.init.normal_(head.weight, std=0.001)
+                nn.init.zeros_(head.bias)
+            else:
+                # Weight heads: Xavier-scaled for target layer fan-in/fan-out
+                target_shape = self.target_shapes[original_name]
+                if len(target_shape) >= 2:
+                    fan_in, fan_out = target_shape[-1], target_shape[-2]
+                    std = math.sqrt(2.0 / (fan_in + fan_out))
+                else:
+                    std = 0.01
+                nn.init.normal_(head.weight, std=std)
+                nn.init.zeros_(head.bias)
 
     def forward(self, context: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -122,7 +159,8 @@ class OscillatorHyperNetwork(nn.Module):
                  hidden_dim: int = 128,
                  generate_coupling: bool = True,
                  generate_frequencies: bool = True,
-                 generate_phases: bool = False):
+                 generate_phases: bool = False,
+                 input_encoding: Literal['identity', 'cos_sin', 'normalized'] = 'identity'):
         """
         Args:
             context_dim: Dimension of conditioning input
@@ -131,6 +169,11 @@ class OscillatorHyperNetwork(nn.Module):
             generate_coupling: Generate coupling matrix K
             generate_frequencies: Generate natural frequencies ω
             generate_phases: Generate initial phases θ
+            input_encoding: Input encoding mode (from hyperlight patterns):
+                - 'identity': Pass context unchanged (default)
+                - 'cos_sin': Concatenate [cos(ctx), sin(ctx)] — doubles dim, adds
+                  frequency features. Best for oscillator-related contexts.
+                - 'normalized': L2-normalize context before encoding.
         """
         super().__init__()
 
@@ -138,10 +181,14 @@ class OscillatorHyperNetwork(nn.Module):
         self.generate_coupling = generate_coupling
         self.generate_frequencies = generate_frequencies
         self.generate_phases = generate_phases
+        self.input_encoding = InputEncoding(input_encoding)
+
+        # Input encoding may change effective dimension
+        effective_dim = context_dim * 2 if input_encoding == 'cos_sin' else context_dim
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Linear(context_dim, hidden_dim),
+            nn.Linear(effective_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU()
@@ -180,6 +227,9 @@ class OscillatorHyperNetwork(nn.Module):
         """
         if context.dim() == 1:
             context = context.unsqueeze(0)
+
+        # Apply input encoding before encoder
+        context = encode_input(context, self.input_encoding)
 
         batch_size = context.shape[0]
         features = self.encoder(context)

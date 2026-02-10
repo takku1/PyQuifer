@@ -58,6 +58,8 @@ class LearnableKuramotoBank(nn.Module):
                  dt: float = 0.01,
                  initial_frequency_range: tuple = (0.5, 1.5),
                  initial_phase_range: tuple = (0.0, 2 * math.pi),
+                 phase_init: Literal['uniform', 'von_mises'] = 'uniform',
+                 phase_init_concentration: float = 1.0,
                  topology: Literal['global', 'small_world', 'scale_free', 'ring', 'learnable'] = 'global',
                  topology_params: Optional[dict] = None,
                  integration_method: Literal['euler', 'rk4'] = 'euler',
@@ -67,7 +69,14 @@ class LearnableKuramotoBank(nn.Module):
             num_oscillators: Number of oscillators in the bank.
             dt: Time step for integration.
             initial_frequency_range: Range for random initialization of natural frequencies.
-            initial_phase_range: Range for random initialization of phases.
+            initial_phase_range: Range for random initialization of phases (uniform mode only).
+            phase_init: Phase initialization method:
+                - 'uniform': Uniform random in initial_phase_range (default)
+                - 'von_mises': Von Mises (circular normal) distribution centered at 0.
+                  Better preserves circular statistics than uniform. Concentration
+                  controls spread: 0 = uniform, large = tightly clustered.
+            phase_init_concentration: Concentration parameter for Von Mises init (kappa).
+                Only used when phase_init='von_mises'. Default 1.0 gives moderate spread.
             topology: Network topology for coupling. Options:
                 - 'global': All-to-all coupling (original behavior)
                 - 'small_world': Watts-Strogatz small-world network
@@ -102,10 +111,20 @@ class LearnableKuramotoBank(nn.Module):
         self.coupling_strength = nn.Parameter(torch.tensor(1.0))
 
         # Oscillator phases (state evolved by Kuramoto dynamics, not backprop)
-        self.register_buffer('phases',
-            torch.rand(num_oscillators) * (initial_phase_range[1] - initial_phase_range[0])
-            + initial_phase_range[0]
-        )
+        if phase_init == 'von_mises':
+            # Von Mises (circular normal) — better than uniform for phase init.
+            # kappa=0 → uniform, kappa=1 → moderate spread, kappa>>1 → tight cluster.
+            vm_dist = torch.distributions.VonMises(
+                loc=torch.tensor(0.0),
+                concentration=torch.tensor(phase_init_concentration)
+            )
+            init_phases = vm_dist.sample((num_oscillators,)) % (2 * math.pi)
+        else:
+            init_phases = (
+                torch.rand(num_oscillators) * (initial_phase_range[1] - initial_phase_range[0])
+                + initial_phase_range[0]
+            )
+        self.register_buffer('phases', init_phases)
 
         # Precision-weighted coupling: stable oscillators drive coupling more
         # Precision = 1 / (phase_velocity_variance + epsilon)
@@ -554,6 +573,108 @@ class LearnableKuramotoBank(nn.Module):
             'escape_probability': torch.tensor(escape_prob),
             'mean_recovery_R': mean_R,
             'R_variance': R_var,
+        }
+
+    def compute_lyapunov_exponent(
+        self,
+        n_steps: int = 500,
+        perturbation_size: float = 1e-6,
+        renorm_interval: int = 10,
+        external_input: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Estimate the largest Lyapunov exponent via dual-trajectory perturbation.
+
+        Runs two copies of the oscillator dynamics — primary (unperturbed) and
+        secondary (slightly perturbed). Periodically measures divergence rate
+        and renormalizes the secondary trajectory. Positive λ indicates chaos,
+        zero indicates edge-of-chaos (criticality), negative indicates stability.
+
+        Adapted from multilayer-cudamoto's Lyapunov measurement approach.
+
+        Args:
+            n_steps: Total integration steps for measurement.
+            perturbation_size: Initial perturbation magnitude (radians).
+            renorm_interval: Steps between renormalization events.
+            external_input: Optional external driving force.
+
+        Returns:
+            lyapunov_exponent: Estimated largest Lyapunov exponent (λ).
+            trajectory_R: Order parameter trajectory of primary system.
+            regime: 'chaotic' (λ>0.01), 'critical' (|λ|<0.01), or 'stable' (λ<-0.01).
+        """
+        with torch.no_grad():
+            # Save current state
+            original_phases = self.phases.clone()
+            original_prev = self.prev_phases.clone()
+            original_var = self.phase_velocity_var.clone()
+            original_prec = self.precision.clone()
+
+            # Primary trajectory starts from current state
+            primary = self.phases.clone()
+
+            # Secondary trajectory = primary + small perturbation
+            perturbation = torch.randn_like(primary) * perturbation_size
+            secondary = (primary + perturbation) % (2 * math.pi)
+
+            log_divergence_sum = 0.0
+            n_renorms = 0
+            R_trajectory = []
+
+            for step in range(n_steps):
+                # Evolve primary
+                self.phases.copy_(primary)
+                self.prev_phases.copy_(primary)
+                self.forward(external_input=external_input, steps=1)
+                primary = self.phases.clone()
+
+                # Record order parameter
+                R_trajectory.append(self.get_order_parameter().item())
+
+                # Evolve secondary
+                self.phases.copy_(secondary)
+                self.prev_phases.copy_(secondary)
+                self.forward(external_input=external_input, steps=1)
+                secondary = self.phases.clone()
+
+                # Renormalize at intervals
+                if (step + 1) % renorm_interval == 0:
+                    # Phase difference on the circle (wrap to [-π, π])
+                    diff = (secondary - primary + math.pi) % (2 * math.pi) - math.pi
+                    dist = diff.norm()
+
+                    if dist > 1e-12:
+                        log_divergence_sum += torch.log(dist / perturbation_size).item()
+                        n_renorms += 1
+
+                        # Renormalize: keep direction, reset magnitude
+                        secondary = (primary + diff / dist * perturbation_size) % (2 * math.pi)
+
+            # Restore original state
+            self.phases.copy_(original_phases)
+            self.prev_phases.copy_(original_prev)
+            self.phase_velocity_var.copy_(original_var)
+            self.precision.copy_(original_prec)
+
+            # Compute Lyapunov exponent
+            if n_renorms > 0:
+                lyapunov = log_divergence_sum / (n_renorms * renorm_interval * self.dt)
+            else:
+                lyapunov = 0.0
+
+            lyapunov_t = torch.tensor(lyapunov)
+
+            if lyapunov > 0.01:
+                regime = 'chaotic'
+            elif lyapunov < -0.01:
+                regime = 'stable'
+            else:
+                regime = 'critical'
+
+        return {
+            'lyapunov_exponent': lyapunov_t,
+            'trajectory_R': torch.tensor(R_trajectory),
+            'regime': regime,
         }
 
     def get_order_parameter(self, phases: torch.Tensor = None) -> torch.Tensor:
