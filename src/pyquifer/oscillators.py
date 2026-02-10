@@ -118,6 +118,10 @@ class LearnableKuramotoBank(nn.Module):
         self._precision_tau = 20.0                          # EMA time constant
         self._precision_epsilon = 1e-4                      # variance floor
 
+        # Cached order parameter from forward() — avoids redundant sin/cos
+        self._cached_R: Optional[torch.Tensor] = None
+        self._cached_Psi: Optional[torch.Tensor] = None
+
         # Initialize adjacency matrix based on topology
         self._init_adjacency(topology, self.topology_params)
 
@@ -143,21 +147,25 @@ class LearnableKuramotoBank(nn.Module):
             p = params.get('p', 0.1)  # rewiring probability
             adj = self._create_small_world(n, k, p)
             self.register_buffer('adjacency', adj)
+            self._build_edge_list(adj)
 
         elif topology == 'scale_free':
             # Barabási-Albert scale-free network
             m = params.get('m', max(1, n // 20))  # edges per new node
             adj = self._create_scale_free(n, m)
             self.register_buffer('adjacency', adj)
+            self._build_edge_list(adj)
 
         elif topology == 'ring':
             # Ring topology with local coupling
             k = params.get('k', 2)  # neighbors on each side
             adj = self._create_ring(n, k)
             self.register_buffer('adjacency', adj)
+            self._build_edge_list(adj)
 
         elif topology == 'learnable':
             # Fully learnable adjacency (soft, between 0-1)
+            # No edge list — adjacency changes each forward pass
             sparsity = params.get('sparsity', 0.5)
             # Initialize with random values, biased toward desired sparsity
             init_values = torch.randn(n, n) * 0.5 - torch.log(torch.tensor(1/sparsity - 1))
@@ -167,6 +175,22 @@ class LearnableKuramotoBank(nn.Module):
 
         else:
             raise ValueError(f"Unknown topology: {topology}")
+
+    def _build_edge_list(self, adj: torch.Tensor):
+        """Convert dense adjacency to COO edge list for O(E) sparse forward pass.
+
+        Stores:
+            _edge_src: (nnz,) int64 — row indices (node receiving influence)
+            _edge_dst: (nnz,) int64 — col indices (node exerting influence)
+            _edge_weight: (nnz,) float — adjacency values
+            _degree: (N,) float — out-degree per row (for normalization)
+        """
+        src, dst = adj.nonzero(as_tuple=True)
+        weights = adj[src, dst]
+        self.register_buffer('_edge_src', src.long())
+        self.register_buffer('_edge_dst', dst.long())
+        self.register_buffer('_edge_weight', weights.float())
+        self.register_buffer('_degree', adj.abs().sum(dim=1).clamp(min=1.0))
 
     def _create_small_world(self, n: int, k: int, p: float) -> torch.Tensor:
         """Create Watts-Strogatz small-world adjacency matrix."""
@@ -226,6 +250,40 @@ class LearnableKuramotoBank(nn.Module):
                 adj[i, (i - j) % n] = 1
         return adj
 
+    def _sparse_coupling(self, ph: torch.Tensor, use_precision: bool) -> torch.Tensor:
+        """Compute Kuramoto coupling via COO edge list — O(E) instead of O(N²).
+
+        Args:
+            ph: Current phases (N,)
+            use_precision: Whether to weight by source precision
+
+        Returns:
+            Normalized interaction per oscillator (N,)
+        """
+        src = self._edge_src        # (nnz,) — node receiving influence
+        dst = self._edge_dst        # (nnz,) — node exerting influence
+        w = self._edge_weight       # (nnz,) — adjacency values
+
+        # sin(theta_src - theta_dst) — matches dense convention: phases[i] - phases[j]
+        sin_diffs = torch.sin(ph[src] - ph[dst])
+
+        if use_precision:
+            # Weight by influencing neighbor's precision
+            prec = self.precision.detach()
+            ew = w * prec[dst]
+            weighted = ew * sin_diffs
+            # Per-row normalization: sum of precision-weighted edges
+            norm = torch.zeros(self.num_oscillators, device=ph.device)
+            norm.scatter_add_(0, src, ew)
+            interaction = torch.zeros(self.num_oscillators, device=ph.device)
+            interaction.scatter_add_(0, src, weighted)
+            return interaction / norm.clamp(min=1e-8)
+        else:
+            weighted = w * sin_diffs
+            interaction = torch.zeros(self.num_oscillators, device=ph.device)
+            interaction.scatter_add_(0, src, weighted)
+            return interaction / self._degree
+
     # ── Phase buffers must stay fp32 for numerical stability ──
     # bfloat16 has only 8 mantissa bits → modular arithmetic near
     # 2*pi accumulates ~10% drift.  Override _apply so that device
@@ -273,6 +331,9 @@ class LearnableKuramotoBank(nn.Module):
         """
         phases = self.phases
         adj = self.get_adjacency()
+        # Invalidate cached order parameter — will be recomputed during step
+        self._cached_R = None
+        self._cached_Psi = None
 
         if external_input is not None:
             if external_input.shape[-1] != self.num_oscillators:
@@ -303,21 +364,20 @@ class LearnableKuramotoBank(nn.Module):
                     sum_cos = cos_phases.sum()
                     interaction_sum = cos_phases * (sum_sin - sin_phases) - sin_phases * (sum_cos - cos_phases)
                     normalized_interaction = interaction_sum / max(self.num_oscillators - 1, 1)
+            elif hasattr(self, '_edge_src'):
+                # Sparse COO path: O(E) instead of O(N²)
+                normalized_interaction = self._sparse_coupling(
+                    phases, use_precision)
             else:
-                # Calculate phase differences: theta_j - theta_i
+                # Dense fallback (learnable topology — changes each step)
                 phase_diffs = phases.unsqueeze(1) - phases.unsqueeze(0)  # (n, n)
-
-                # Apply per-connection coupling matrix if enabled
                 effective_adj = adj
                 if self.learnable_coupling_matrix:
                     effective_adj = adj * self.coupling_matrix
-
                 if use_precision:
-                    # Precision-weighted adjacency: effective_adj = adj * source_precision
-                    effective_adj = effective_adj * self.precision.detach().unsqueeze(0)  # (n, n) * (1, n) = broadcast over rows
+                    effective_adj = effective_adj * self.precision.detach().unsqueeze(0)
                     weighted_interaction = effective_adj * torch.sin(phase_diffs)
                     interaction_sum = torch.sum(weighted_interaction, dim=1)
-                    # Normalize by sum of effective weights per row
                     weight_sums = effective_adj.sum(dim=1).clamp(min=1e-8)
                     normalized_interaction = interaction_sum / weight_sums
                 else:
@@ -330,6 +390,7 @@ class LearnableKuramotoBank(nn.Module):
             if self.integration_method == 'rk4':
                 # Build RHS closure capturing current coupling state
                 _ext = external_input
+                _has_edges = hasattr(self, '_edge_src')
 
                 def _kuramoto_rhs(ph):
                     # Recompute coupling for this intermediate state
@@ -348,6 +409,8 @@ class LearnableKuramotoBank(nn.Module):
                             sc = cp.sum()
                             ints = cp * (ss - sp) - sp * (sc - cp)
                             ni = ints / (self.num_oscillators - 1)
+                    elif _has_edges:
+                        ni = self._sparse_coupling(ph, use_precision)
                     else:
                         pd = ph.unsqueeze(1) - ph.unsqueeze(0)
                         ea = adj
@@ -375,6 +438,16 @@ class LearnableKuramotoBank(nn.Module):
                 if external_input is not None:
                     d_theta_dt = d_theta_dt + external_input
                 phases = (phases + d_theta_dt * self.dt) % (2 * math.pi)
+
+        # ── Fused order parameter: reuse final phases, avoid redundant sin/cos ──
+        # R*e^(iPsi) = (1/N) * sum(e^(i*theta))
+        _N = float(self.num_oscillators)
+        _sin_final = torch.sin(phases)
+        _cos_final = torch.cos(phases)
+        _mean_sin = _sin_final.sum() / _N
+        _mean_cos = _cos_final.sum() / _N
+        self._cached_R = torch.sqrt(_mean_sin * _mean_sin + _mean_cos * _mean_cos)
+        self._cached_Psi = torch.atan2(_mean_sin, _mean_cos)
 
         # Update precision from phase velocity variance
         with torch.no_grad():
@@ -483,7 +556,11 @@ class LearnableKuramotoBank(nn.Module):
         """
         Calculates the global order parameter R for the oscillator bank.
         R = |(1/N) * sum(e^(i*theta_j))|
+
+        Uses cached value from forward() when available (avoids redundant sin/cos).
         """
+        if phases is None and self._cached_R is not None:
+            return self._cached_R
         if phases is None:
             phases = self.phases
 
@@ -509,9 +586,19 @@ class LearnableKuramotoBank(nn.Module):
             return torch.abs(global_mean).expand(self.num_oscillators)
 
         # Weighted average of neighbors' complex phases
-        neighbor_sum = torch.matmul(adj.to(complex_phases.dtype), complex_phases)
-        neighbor_count = adj.sum(dim=1).clamp(min=1)
-        local_mean = neighbor_sum / neighbor_count
+        if hasattr(self, '_edge_src'):
+            # Sparse COO path
+            neighbor_sum = torch.zeros(
+                self.num_oscillators, dtype=complex_phases.dtype,
+                device=phases.device)
+            neighbor_sum.scatter_add_(
+                0, self._edge_src.to(torch.int64),
+                self._edge_weight.to(complex_phases.dtype) * complex_phases[self._edge_dst])
+            local_mean = neighbor_sum / self._degree.to(complex_phases.dtype)
+        else:
+            neighbor_sum = torch.matmul(adj.to(complex_phases.dtype), complex_phases)
+            neighbor_count = adj.sum(dim=1).clamp(min=1)
+            local_mean = neighbor_sum / neighbor_count
 
         return torch.abs(local_mean)
 

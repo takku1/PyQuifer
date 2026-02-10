@@ -800,7 +800,8 @@ class CognitiveCycle(nn.Module):
         # Use Kuramoto-specific criticality monitor based on order parameter R
         # This is the correct metric for continuous oscillator networks:
         # susceptibility χ = N·var(R) peaks at the critical coupling K_c
-        R_current = self.oscillators.get_order_parameter()
+        # Reuse cached R from forward() — avoids redundant sin/cos computation
+        R_current = coherence
         crit = self._kuramoto_criticality(
             R_current, num_oscillators=self.oscillators.num_oscillators,
         )
