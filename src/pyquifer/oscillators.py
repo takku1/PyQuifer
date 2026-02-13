@@ -60,10 +60,11 @@ class LearnableKuramotoBank(nn.Module):
                  initial_phase_range: tuple = (0.0, 2 * math.pi),
                  phase_init: Literal['uniform', 'von_mises'] = 'uniform',
                  phase_init_concentration: float = 1.0,
-                 topology: Literal['global', 'small_world', 'scale_free', 'ring', 'learnable'] = 'global',
+                 topology: Literal['global', 'small_world', 'scale_free', 'ring', 'learnable', 'modular'] = 'global',
                  topology_params: Optional[dict] = None,
                  integration_method: Literal['euler', 'rk4'] = 'euler',
-                 learnable_coupling_matrix: bool = False):
+                 learnable_coupling_matrix: bool = False,
+                 frustration: float = 0.0):
         """
         Args:
             num_oscillators: Number of oscillators in the bank.
@@ -91,6 +92,11 @@ class LearnableKuramotoBank(nn.Module):
             integration_method: 'euler' (default) or 'rk4' (4th-order Runge-Kutta)
             learnable_coupling_matrix: If True, use per-connection learnable weights
                 instead of a single scalar coupling_strength. Required for EP training.
+            frustration: Kuramoto-Sakaguchi phase-lag parameter alpha (radians).
+                Coupling becomes sin(theta_j - theta_i - alpha). Nonzero alpha
+                promotes metastable chimera states in modular networks.
+                (Frontiers in Network Physiology 2024; Sakaguchi & Kuramoto 1986)
+                Default 0.0 recovers standard Kuramoto.
         """
         super().__init__()
         self.num_oscillators = num_oscillators
@@ -100,6 +106,7 @@ class LearnableKuramotoBank(nn.Module):
         self.topology_params = topology_params or {}
         self._global_topology = False  # Will be set True for global topology
         self.learnable_coupling_matrix = learnable_coupling_matrix
+        self.frustration = frustration  # Kuramoto-Sakaguchi phase-lag α
 
         # Learnable natural frequencies for each oscillator
         self.natural_frequencies = nn.Parameter(
@@ -183,6 +190,18 @@ class LearnableKuramotoBank(nn.Module):
             # Ring topology with local coupling
             k = params.get('k', 2)  # neighbors on each side
             adj = self._create_ring(n, k)
+            self.register_buffer('adjacency', adj)
+            self._build_edge_list(adj)
+
+        elif topology == 'modular':
+            # Hierarchical modular network.
+            # Dense within modules (intra_density), sparse between (inter_density).
+            # Deco et al. 2017: modularity is the strongest predictor of
+            # robust metastability in connectome-derived oscillator models.
+            n_modules = params.get('n_modules', 4)
+            intra_density = params.get('intra_density', 0.8)
+            inter_density = params.get('inter_density', 0.1)
+            adj = self._create_modular(n, n_modules, intra_density, inter_density)
             self.register_buffer('adjacency', adj)
             self._build_edge_list(adj)
 
@@ -273,6 +292,108 @@ class LearnableKuramotoBank(nn.Module):
                 adj[i, (i - j) % n] = 1
         return adj
 
+    def _create_modular(self, n: int, n_modules: int,
+                         intra_density: float, inter_density: float) -> torch.Tensor:
+        """Create hierarchical modular network.
+
+        Dense within modules (intra_density), sparse between (inter_density).
+        Deco et al. 2017: modularity → maximal metastability.
+
+        Args:
+            n: Number of oscillators
+            n_modules: Number of modules
+            intra_density: Connection probability within modules (0-1)
+            inter_density: Connection probability between modules (0-1)
+
+        Returns:
+            Symmetric adjacency matrix (n, n)
+        """
+        adj = torch.zeros(n, n)
+        module_size = n // n_modules
+        remainder = n % n_modules
+
+        # Compute module boundaries (distribute remainder evenly)
+        boundaries = []
+        start = 0
+        for m in range(n_modules):
+            end = start + module_size + (1 if m < remainder else 0)
+            boundaries.append((start, end))
+            start = end
+
+        # Vectorized intra-module connections
+        for s, e in boundaries:
+            if e - s < 2:
+                continue
+            block = torch.rand(e - s, e - s)
+            mask = (block < intra_density).float()
+            # Zero diagonal (no self-connections)
+            mask.fill_diagonal_(0.0)
+            # Symmetrize
+            mask = (mask + mask.T).clamp(max=1.0)
+            adj[s:e, s:e] = mask
+
+        # Vectorized inter-module connections
+        for i, (s1, e1) in enumerate(boundaries):
+            for j, (s2, e2) in enumerate(boundaries):
+                if i >= j:
+                    continue
+                block = torch.rand(e1 - s1, e2 - s2)
+                mask = (block < inter_density).float()
+                adj[s1:e1, s2:e2] = mask
+                adj[s2:e2, s1:e1] = mask.T  # Symmetrize
+
+        # Store module boundaries for per-module order parameter computation
+        self._module_boundaries = boundaries
+
+        return adj
+
+    def get_module_order_parameters(self) -> Optional[torch.Tensor]:
+        """Compute per-module order parameters for modular topology.
+
+        Each R_m = |mean(exp(i * phase_m))| measures within-module synchrony.
+        Differing R_m values across modules indicate chimera states
+        (Crowe et al. 2024, Frontiers in Network Physiology).
+
+        Returns:
+            Tensor of shape (n_modules,) with R values per module,
+            or None if topology is not modular.
+        """
+        if self.topology != 'modular' or not hasattr(self, '_module_boundaries'):
+            return None
+        Rs = []
+        for start, end in self._module_boundaries:
+            module_phases = self.phases[start:end]
+            z = torch.exp(1j * module_phases.to(torch.complex64))
+            Rs.append(torch.abs(z.mean()))
+        return torch.stack(Rs)
+
+    def set_frequency_bands(self, bands: list, dt: float):
+        """Assign frequency bands to oscillator subgroups.
+
+        Converts Hz → rad/s for the Kuramoto equation. The forward pass
+        applies ``* self.dt`` to convert rad/s → rad/step, so we store
+        in rad/s here (NOT pre-multiplied by dt).
+
+        Args:
+            bands: List of (count, freq_lo_hz, freq_hi_hz) tuples.
+                   Sum of counts must equal num_oscillators.
+            dt: Integration timestep (unused — kept for API compat).
+        """
+        total = sum(b[0] for b in bands)
+        if total != self.num_oscillators:
+            raise ValueError(
+                f"Band counts sum to {total}, expected {self.num_oscillators}"
+            )
+        with torch.no_grad():
+            idx = 0
+            for count, lo_hz, hi_hz in bands:
+                # Uniform random frequencies in Hz, converted to rad/s
+                # (forward pass multiplies by self.dt to get rad/step)
+                freqs_hz = torch.rand(count) * (hi_hz - lo_hz) + lo_hz
+                omega = freqs_hz * 2 * math.pi
+                self.natural_frequencies.data[idx:idx + count] = omega
+                idx += count
+
     def _sparse_coupling(self, ph: torch.Tensor, use_precision: bool) -> torch.Tensor:
         """Compute Kuramoto coupling via COO edge list — O(E) instead of O(N²).
 
@@ -287,8 +408,8 @@ class LearnableKuramotoBank(nn.Module):
         dst = self._edge_dst        # (nnz,) — node exerting influence
         w = self._edge_weight       # (nnz,) — adjacency values
 
-        # sin(theta_src - theta_dst) — matches dense convention: phases[i] - phases[j]
-        sin_diffs = torch.sin(ph[src] - ph[dst])
+        # sin(theta_src - theta_dst - alpha) — Kuramoto-Sakaguchi coupling
+        sin_diffs = torch.sin(ph[src] - ph[dst] - self.frustration)
 
         if use_precision:
             # Weight by influencing neighbor's precision
@@ -363,6 +484,9 @@ class LearnableKuramotoBank(nn.Module):
                 raise ValueError(f"External input last dimension {external_input.shape[-1]} "
                                  f"must match num_oscillators {self.num_oscillators}")
 
+        _alpha = self.frustration
+        _has_frustration = _alpha != 0.0
+
         for _ in range(steps):
             if adj is None:
                 # Global topology: O(n) computation
@@ -374,18 +498,37 @@ class LearnableKuramotoBank(nn.Module):
                     prec = self.precision.detach()
                     w_sin = (sin_phases * prec).sum()
                     w_cos = (cos_phases * prec).sum()
-                    # Subtract self-contribution
-                    interaction_sum = (
+                    # Subtract self-contribution: sum_j sin(θ_j - θ_i)
+                    sin_interaction = (
                         cos_phases * (w_sin - sin_phases * prec)
                         - sin_phases * (w_cos - cos_phases * prec)
                     )
+                    if _has_frustration:
+                        # Kuramoto-Sakaguchi: sin(θ_j - θ_i - α) =
+                        #   cos(α)*sin(θ_j-θ_i) - sin(α)*cos(θ_j-θ_i)
+                        cos_interaction = (
+                            sin_phases * (w_sin - sin_phases * prec)
+                            + cos_phases * (w_cos - cos_phases * prec)
+                        )
+                        ca = math.cos(_alpha)
+                        sa = math.sin(_alpha)
+                        interaction_sum = ca * sin_interaction - sa * cos_interaction
+                    else:
+                        interaction_sum = sin_interaction
                     # Normalize by sum of precisions (excluding self)
                     prec_sum = prec.sum() - prec
                     normalized_interaction = interaction_sum / prec_sum.clamp(min=1e-8)
                 else:
                     sum_sin = sin_phases.sum()
                     sum_cos = cos_phases.sum()
-                    interaction_sum = cos_phases * (sum_sin - sin_phases) - sin_phases * (sum_cos - cos_phases)
+                    sin_interaction = cos_phases * (sum_sin - sin_phases) - sin_phases * (sum_cos - cos_phases)
+                    if _has_frustration:
+                        cos_interaction = sin_phases * (sum_sin - sin_phases) + cos_phases * (sum_cos - cos_phases)
+                        ca = math.cos(_alpha)
+                        sa = math.sin(_alpha)
+                        interaction_sum = ca * sin_interaction - sa * cos_interaction
+                    else:
+                        interaction_sum = sin_interaction
                     normalized_interaction = interaction_sum / max(self.num_oscillators - 1, 1)
             elif hasattr(self, '_edge_src'):
                 # Sparse COO path: O(E) instead of O(N²)
@@ -394,17 +537,18 @@ class LearnableKuramotoBank(nn.Module):
             else:
                 # Dense fallback (learnable topology — changes each step)
                 phase_diffs = phases.unsqueeze(1) - phases.unsqueeze(0)  # (n, n)
+                sin_pd = torch.sin(phase_diffs - _alpha)  # Kuramoto-Sakaguchi
                 effective_adj = adj
                 if self.learnable_coupling_matrix:
                     effective_adj = adj * self.coupling_matrix
                 if use_precision:
                     effective_adj = effective_adj * self.precision.detach().unsqueeze(0)
-                    weighted_interaction = effective_adj * torch.sin(phase_diffs)
+                    weighted_interaction = effective_adj * sin_pd
                     interaction_sum = torch.sum(weighted_interaction, dim=1)
                     weight_sums = effective_adj.sum(dim=1).clamp(min=1e-8)
                     normalized_interaction = interaction_sum / weight_sums
                 else:
-                    weighted_interaction = effective_adj * torch.sin(phase_diffs)
+                    weighted_interaction = effective_adj * sin_pd
                     interaction_sum = torch.sum(weighted_interaction, dim=1)
                     connection_counts = effective_adj.abs().sum(dim=1).clamp(min=1)
                     normalized_interaction = interaction_sum / connection_counts
@@ -424,29 +568,36 @@ class LearnableKuramotoBank(nn.Module):
                             pr = self.precision.detach()
                             ws = (sp * pr).sum()
                             wc = (cp * pr).sum()
-                            ints = cp * (ws - sp * pr) - sp * (wc - cp * pr)
+                            si = cp * (ws - sp * pr) - sp * (wc - cp * pr)
+                            if _has_frustration:
+                                ci = sp * (ws - sp * pr) + cp * (wc - cp * pr)
+                                si = math.cos(_alpha) * si - math.sin(_alpha) * ci
                             ps = pr.sum() - pr
-                            ni = ints / ps.clamp(min=1e-8)
+                            ni = si / ps.clamp(min=1e-8)
                         else:
                             ss = sp.sum()
                             sc = cp.sum()
-                            ints = cp * (ss - sp) - sp * (sc - cp)
-                            ni = ints / (self.num_oscillators - 1)
+                            si = cp * (ss - sp) - sp * (sc - cp)
+                            if _has_frustration:
+                                ci = sp * (ss - sp) + cp * (sc - cp)
+                                si = math.cos(_alpha) * si - math.sin(_alpha) * ci
+                            ni = si / (self.num_oscillators - 1)
                     elif _has_edges:
                         ni = self._sparse_coupling(ph, use_precision)
                     else:
                         pd = ph.unsqueeze(1) - ph.unsqueeze(0)
+                        spd = torch.sin(pd - _alpha)  # Kuramoto-Sakaguchi
                         ea = adj
                         if self.learnable_coupling_matrix:
                             ea = ea * self.coupling_matrix
                         if use_precision:
                             ea = ea * self.precision.detach().unsqueeze(0)
-                            wi = ea * torch.sin(pd)
+                            wi = ea * spd
                             is_ = torch.sum(wi, dim=1)
                             ws = ea.sum(dim=1).clamp(min=1e-8)
                             ni = is_ / ws
                         else:
-                            wi = ea * torch.sin(pd)
+                            wi = ea * spd
                             is_ = torch.sum(wi, dim=1)
                             cc = ea.abs().sum(dim=1).clamp(min=1)
                             ni = is_ / cc

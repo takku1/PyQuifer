@@ -93,9 +93,15 @@ class PyQuifer(nn.Module):
         Args:
             data: pd.DataFrame, np.ndarray, or List[Dict]
         """
-        import pandas as pd
-        from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-        from sklearn.decomposition import PCA
+        try:
+            import pandas as pd
+            from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+            from sklearn.decomposition import PCA
+        except ImportError as e:
+            raise ImportError(
+                "pandas and scikit-learn are required for data preprocessing. "
+                "Install with: pip install pyquifer[datascience]"
+            ) from e
 
         if isinstance(data, list):
             # Attempt to convert list of dicts to DataFrame

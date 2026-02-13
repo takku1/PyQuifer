@@ -281,6 +281,8 @@ __all__ = [
     "PyQuiferBridge",
     "ModulationState",
     "sync_debug_mode",
+    "SteppedModulator",
+    "PyQuiferLogitsProcessor",
     # Volatility Filter (adaptive learning rates from HGF)
     "VolatilityNode",
     "HierarchicalVolatilityFilter",
@@ -454,6 +456,11 @@ __all__ = [
     "FlashLTC",
     "FlashCfC",
     "FlashLTCLayer",
+    # Adapter Manager (oscillator-driven LoRA)
+    "AdapterManager",
+    "AdapterGate",
+    "AdapterConfig",
+    "BlendState",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -761,6 +768,8 @@ _LAZY_IMPORTS = {
     # Bridge
     "PyQuiferBridge": (".bridge", "PyQuiferBridge"),
     "sync_debug_mode": (".bridge", "sync_debug_mode"),
+    "SteppedModulator": (".bridge", "SteppedModulator"),
+    "PyQuiferLogitsProcessor": (".bridge", "PyQuiferLogitsProcessor"),
 
     # Volatility Filter
     "VolatilityNode": (".volatility_filter", "VolatilityNode"),
@@ -974,6 +983,12 @@ _LAZY_IMPORTS = {
     "FlashLTC": (".flash_rnn", "FlashLTC"),
     "FlashCfC": (".flash_rnn", "FlashCfC"),
     "FlashLTCLayer": (".flash_rnn", "FlashLTCLayer"),
+
+    # Adapter Manager (oscillator-driven LoRA)
+    "AdapterManager": (".adapter_manager", "AdapterManager"),
+    "AdapterGate": (".adapter_manager", "AdapterGate"),
+    "AdapterConfig": (".adapter_manager", "AdapterConfig"),
+    "BlendState": (".adapter_manager", "BlendState"),
 }
 
 # Cache for loaded attributes

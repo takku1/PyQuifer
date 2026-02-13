@@ -264,7 +264,14 @@ class NarrativeIdentity(nn.Module):
                  dim: int,
                  tau: float = 0.01,
                  consistency_weight: float = 0.1,
-                 tonic_drift: Optional[torch.Tensor] = None):
+                 tonic_drift: Optional[torch.Tensor] = None,
+                 identity_base_rate: float = 0.003,
+                 identity_saturation: float = 5.0,
+                 # Two-timescale identity (Fix 8 — neuroscience alignment v3)
+                 identity_fast_rate: float = 0.01,
+                 identity_slow_rate: float = 0.001,
+                 identity_fast_decay: float = 0.9995,
+                 schema_speedup: float = 15.0):
         """
         Args:
             dim: Narrative dimension
@@ -274,11 +281,31 @@ class NarrativeIdentity(nn.Module):
                         developmental trajectories — the direction identity
                         evolves independently of observations. E.g., slowly
                         becoming more empathetic. Default: no drift (zeros).
+            identity_base_rate: Initial rate of identity growth (when identity ≈ 0).
+                              Growth follows 1/(1 + strength * saturation) curve —
+                              fast when novel, logarithmic saturation when stabilized.
+            identity_saturation: Controls how quickly growth slows. Higher = faster
+                               saturation. At saturation=5, identity=0.5 gives
+                               delta ≈ base_rate/3.5 (71% reduction from initial).
+            identity_fast_rate: Rate for fast (synaptic) consolidation path.
+                              Decays without reinforcement — models E-LTP.
+            identity_slow_rate: Rate for slow (systems) consolidation path.
+                              Permanent once consolidated — models L-LTP.
+            identity_fast_decay: Decay factor for fast path per tick.
+                               0.9995 → ~50% decay over 1400 ticks.
+            schema_speedup: Maximum speedup for schema-conformant experiences.
+                          Tse et al. 2007: 15-20x for schema-fitting memories.
         """
         super().__init__()
         self.dim = dim
         self.tau = tau
         self.consistency_weight = consistency_weight
+        self.identity_base_rate = identity_base_rate
+        self.identity_saturation = identity_saturation
+        self.identity_fast_rate = identity_fast_rate
+        self.identity_slow_rate = identity_slow_rate
+        self.identity_fast_decay = identity_fast_decay
+        self.schema_speedup = schema_speedup
 
         # The narrative (slow-moving self-summary)
         self.register_buffer('narrative', torch.zeros(dim))
@@ -286,6 +313,13 @@ class NarrativeIdentity(nn.Module):
         self.register_buffer('narrative_velocity', torch.zeros(dim))
         # How established the identity is (increases with time)
         self.register_buffer('identity_strength', torch.tensor(0.0))
+
+        # Two-timescale identity (Fix 8):
+        # Fast path = synaptic consolidation (E-LTP, hours timescale)
+        # Slow path = systems consolidation (L-LTP, weeks timescale)
+        # Combined = identity_strength
+        self.register_buffer('identity_fast', torch.tensor(0.0))
+        self.register_buffer('identity_slow', torch.tensor(0.0))
 
         # Tonic drift: personality evolves independently of input
         # (from pyhgf's tonic_drift concept applied to narrative identity)
@@ -326,9 +360,32 @@ class NarrativeIdentity(nn.Module):
             # Velocity
             self.narrative_velocity.copy_(self.narrative - old_narrative)
 
-            # Identity strengthens over time
-            self.identity_strength.add_(0.001)
-            self.identity_strength.clamp_(max=1.0)
+            # Two-timescale identity consolidation (Fix 8):
+            # Fast path (synaptic / E-LTP): rapid acquisition, decays without
+            # reinforcement. Models the observation that new memories are
+            # initially labile and require consolidation.
+            # The fast path only strengthens when there's meaningful, consistent
+            # input — input magnitude gates the additive term.
+            dev_norm = deviation.norm().item()
+            input_magnitude = current_self_summary.norm().item()
+            input_gate = min(1.0, input_magnitude)  # 0 for empty input
+            fast_val = self.identity_fast.item()
+            delta_fast = (self.identity_fast_rate / (1.0 + fast_val * self.identity_saturation)) * input_gate
+            self.identity_fast.mul_(self.identity_fast_decay).add_(delta_fast)
+            self.identity_fast.clamp_(max=0.7)  # fast alone can't reach full identity
+
+            # Slow path (systems / L-LTP): permanent, schema-accelerated.
+            # Tse et al. 2007: schema-conformant memories consolidate 15-20x
+            # faster. Schema fit = how well current input matches the narrative.
+            schema_fit = max(0.0, min(1.0, 1.0 - dev_norm))
+            schema_multiplier = 1.0 + self.schema_speedup * schema_fit ** 2
+            slow_val = self.identity_slow.item()
+            delta_slow = (self.identity_slow_rate / (1.0 + slow_val * self.identity_saturation)) * schema_multiplier
+            self.identity_slow.add_(delta_slow)
+            self.identity_slow.clamp_(max=1.0)
+
+            # Combined identity strength
+            self.identity_strength.copy_((self.identity_fast + self.identity_slow).clamp(max=1.0))
 
         return {
             'narrative': self.narrative.clone(),
@@ -365,6 +422,8 @@ class NarrativeIdentity(nn.Module):
         self.narrative.zero_()
         self.narrative_velocity.zero_()
         self.identity_strength.zero_()
+        self.identity_fast.zero_()
+        self.identity_slow.zero_()
 
 
 if __name__ == '__main__':

@@ -320,16 +320,19 @@ class DominanceDetector(nn.Module):
     def __init__(self,
                  num_levels: int = 3,
                  num_bins: int = 8,
-                 buffer_size: int = 200):
+                 buffer_size: int = 200,
+                 hysteresis: float = 0.05):
         """
         Args:
             num_levels: Number of hierarchy levels (bottom=sensory, top=abstract)
             num_bins: Bins for TE estimation
             buffer_size: Time series buffer
+            hysteresis: Band width for mode switching hysteresis
         """
         super().__init__()
         self.num_levels = num_levels
         self.buffer_size = buffer_size
+        self.hysteresis = hysteresis
 
         self.te_estimator = TransferEntropyEstimator(
             num_bins=num_bins, buffer_size=buffer_size
@@ -346,22 +349,42 @@ class DominanceDetector(nn.Module):
         # Dominance ratio
         self.register_buffer('dominance_ratio', torch.tensor(0.5))
 
+        # Running statistics for adaptive mode thresholds
+        # Instead of static 0.4/0.6 thresholds, derive from observed ratio distribution
+        self._ratio_ema: float = 0.5       # Exponential moving average of ratio
+        self._ratio_var_ema: float = 0.01   # EMA of variance (for adaptive band width)
+        self._ema_alpha: float = 0.05       # Smoothing factor
+        self._current_mode: str = 'balanced'
+
     def forward(self,
                 level_activations: torch.Tensor,
-                compute_every: int = 50) -> Dict[str, torch.Tensor]:
+                compute_every: int = 10,
+                criticality_distance: float = None) -> Dict[str, torch.Tensor]:
         """
-        Record level activations and compute dominance.
+        Record level activations and compute dominance with three-way mode detection.
+
+        Uses adaptive thresholds derived from running statistics of the dominance
+        ratio, with hysteresis to prevent rapid mode flipping. This produces the
+        metastable mode-switching pattern observed in empirical EEG studies
+        (100-500ms timescale at default tick rate).
+
+        When ``criticality_distance`` is provided, hysteresis is scaled by
+        ``1/sqrt(crit_dist)`` — implementing critical slowing down
+        (Meisel et al. 2015, SNIC scaling exponents). Near the critical point,
+        modes persist longer; far from it, transitions are faster.
 
         Args:
             level_activations: Summary activation per hierarchy level (num_levels,)
-            compute_every: How often to recompute TE
+            compute_every: How often to recompute TE (default 10 for ~2s switching)
+            criticality_distance: Optional distance from critical point.
+                Small values → near-critical → modes persist longer.
 
         Returns:
             Dictionary with:
-            - dominance_ratio: > 0.5 = perception, < 0.5 = imagination
+            - dominance_ratio: > 0.5 = perception-leaning, < 0.5 = imagination-leaning
             - bottom_up_te: Total upward TE
             - top_down_te: Total downward TE
-            - mode: 'perception' or 'imagination'
+            - mode: 'perception', 'imagination', or 'balanced'
         """
         with torch.no_grad():
             idx = self._hist_ptr_py % self.buffer_size
@@ -374,7 +397,8 @@ class DominanceDetector(nn.Module):
         bottom_up_te = torch.tensor(0.0, device=level_activations.device)
         top_down_te = torch.tensor(0.0, device=level_activations.device)
 
-        if n_valid >= 20 and self._hist_ptr_py % compute_every == 0:
+        # Lower minimum from 20 to 5 — don't wait 4s for first mode decision
+        if n_valid >= 5 and self._hist_ptr_py % compute_every == 0:
             series = self.level_history[:n_valid]
 
             # Sum TE from lower→higher levels (bottom-up)
@@ -389,23 +413,63 @@ class DominanceDetector(nn.Module):
             top_down_te = torch.tensor(td, device=level_activations.device)
 
             total = bu + td + 1e-8
+            new_ratio = bu / total
             with torch.no_grad():
-                self.dominance_ratio.fill_(bu / total)
+                self.dominance_ratio.fill_(new_ratio)
 
-        mode = 'perception' if self.dominance_ratio > 0.5 else 'imagination'
+            # Update running statistics for adaptive thresholds
+            alpha = self._ema_alpha
+            self._ratio_var_ema = (1 - alpha) * self._ratio_var_ema + alpha * (new_ratio - self._ratio_ema) ** 2
+            self._ratio_ema = (1 - alpha) * self._ratio_ema + alpha * new_ratio
+
+        # Adaptive three-way thresholds from running statistics
+        # Band width = max(hysteresis, 1σ of observed ratio) — widens when ratio
+        # is volatile, narrows when stable. Center is the running mean.
+        sigma = math.sqrt(max(1e-6, self._ratio_var_ema))
+        band = max(self.hysteresis, sigma)
+        center = self._ratio_ema
+        upper = center + band   # Above this = perception
+        lower = center - band   # Below this = imagination
+
+        ratio = float(self.dominance_ratio.item())
+
+        # Hysteresis: once in a mode, need to cross further to leave.
+        # Fix 7: Critical slowing down — scale hysteresis by 1/sqrt(crit_dist).
+        # Near the critical point (small crit_dist), modes persist much longer.
+        # At crit_dist=0.01: 10x wider hysteresis; at crit_dist=0.16: 2.5x.
+        # (Meisel et al. 2015: tau ~ (mu_c - mu)^(-0.5))
+        hyst = self.hysteresis
+        if criticality_distance is not None:
+            crit_scale = 1.0 / math.sqrt(max(0.01, criticality_distance))
+            hyst = hyst * crit_scale
+        if self._current_mode == 'perception':
+            if ratio < upper - hyst:
+                self._current_mode = 'balanced' if ratio > lower + hyst else 'imagination'
+        elif self._current_mode == 'imagination':
+            if ratio > lower + hyst:
+                self._current_mode = 'balanced' if ratio < upper - hyst else 'perception'
+        else:  # balanced
+            if ratio > upper:
+                self._current_mode = 'perception'
+            elif ratio < lower:
+                self._current_mode = 'imagination'
 
         return {
             'dominance_ratio': self.dominance_ratio.clone(),
             'bottom_up_te': bottom_up_te,
             'top_down_te': top_down_te,
-            'mode': mode,
+            'mode': self._current_mode,
         }
 
     def reset(self):
         """Reset buffer and dominance."""
         self.level_history.zero_()
         self.hist_ptr.zero_()
+        self._hist_ptr_py = 0
         self.dominance_ratio.fill_(0.5)
+        self._ratio_ema = 0.5
+        self._ratio_var_ema = 0.01
+        self._current_mode = 'balanced'
 
 
 if __name__ == '__main__':

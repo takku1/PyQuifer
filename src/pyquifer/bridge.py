@@ -225,6 +225,16 @@ class PyQuiferBridge(nn.Module):
         from pyquifer.integration import CycleConfig
         return PyQuiferBridge(CycleConfig.realtime())
 
+    @staticmethod
+    def neuroscience():
+        """Bridge tuned for maximum neuroscience alignment.
+
+        Uses modular oscillator topology, true theta-gamma PAC,
+        size-normalized metastability, and avalanche-consciousness linking.
+        """
+        from pyquifer.integration import CycleConfig
+        return PyQuiferBridge(CycleConfig.neuroscience())
+
     def compile(self, mode: str = "default",
                 backend: str = "inductor") -> 'PyQuiferBridge':
         """Apply torch.compile to performance-critical submodules.
@@ -450,7 +460,13 @@ class PyQuiferBridge(nn.Module):
             )
 
             repetition_penalty = self._compute_repetition_penalty(coherence_f, motivation_f)
-            top_p = self._compute_top_p(coherence_f, 0.5)  # No criticality_distance in minimal path
+
+            # Read real cached metrics from cycle (updated every tick, no .item() overhead)
+            crit_dist_f = self.cycle._cached_criticality_distance.item()
+            free_energy_f = self.cycle._cached_free_energy.item()
+            identity_str_f = self.cycle._cached_identity_strength.item()
+
+            top_p = self._compute_top_p(coherence_f, crit_dist_f)
 
             # Personality blend: convert tensor → list
             pb_weights = result.personality_blend.tolist()
@@ -466,9 +482,9 @@ class PyQuiferBridge(nn.Module):
                 processing_mode=processing_mode_str,
                 coherence=coherence_f,
                 motivation=motivation_f,
-                free_energy=0.0,  # Not available in minimal path
-                criticality_distance=0.5,  # Not available in minimal path
-                identity_strength=0.0,  # Not available in minimal path
+                free_energy=free_energy_f,
+                criticality_distance=crit_dist_f,
+                identity_strength=identity_str_f,
                 tick=self.cycle._tick_py,
                 phases=self.cycle.oscillators.phases.detach(),
                 neuromodulator_levels=self.cycle.neuromodulation.levels.detach(),
