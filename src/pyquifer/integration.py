@@ -183,6 +183,11 @@ class CycleConfig:
     use_complex_oscillators: bool = False  # Complex z=A*exp(i*phi) backend
     use_cuda_kernels: bool = False         # CUDA Kuramoto acceleration
 
+    # v7: Neuroscience dynamics alignment
+    use_ou_dephasing: bool = False         # Multi-timescale OU noise cascade (1/f spectrum)
+    use_spike_activity: bool = False       # Spike-based activity buffer (avalanche scaling)
+    diagnostics_buffer_len: int = 200      # Length of R/activity history buffers
+
     # Phase 6: Integration method (G-17)
     integration_method: str = 'euler'  # 'euler' or 'rk4' — passed to oscillators/neural_mass
 
@@ -296,6 +301,10 @@ class CycleConfig:
             use_theta_gamma_pac=True,
             theta_oscillators=8,
             target_metastability=0.0,  # auto-scale via 1/sqrt(N)
+            # v7: Dynamics fixes for PhD-defensible neuroscience metrics
+            use_ou_dephasing=True,        # OU cascade → 1/f^β spectral slope
+            use_spike_activity=True,      # Spike-based activity → power-law avalanches
+            diagnostics_buffer_len=1000,  # Longer buffer → proper LZ/DFA scaling
         )
 
 
@@ -306,6 +315,7 @@ def _criticality_feedback(
     R_current: torch.Tensor,
     dephasing_gain: torch.Tensor = None,
     R_target: torch.Tensor = None,
+    colored_noise: torch.Tensor = None,
 ) -> torch.Tensor:
     """Pure-tensor criticality feedback loop (slow + fast paths).
 
@@ -323,6 +333,8 @@ def _criticality_feedback(
             targets SD(R) ≈ target_metastability. Novel formula from
             Michel & Koenig 2018 / Cabral et al.
         R_target: Target R for dephasing threshold (default 0.42 if None)
+        colored_noise: Pre-computed OU cascade noise (num_oscillators,).
+            When provided, replaces white randn noise for 1/f^β spectrum.
 
     Returns:
         Updated phases tensor (with dephasing applied)
@@ -347,9 +359,16 @@ def _criticality_feedback(
     # variable rather than a static R threshold.
     _R_tgt = R_target if R_target is not None else torch.tensor(0.42, device=R_current.device)
     _gain = dephasing_gain if dephasing_gain is not None else torch.tensor(1.5, device=R_current.device)
-    R_excess = (R_current - _R_tgt).clamp(min=0.0)
-    noise_scale = (R_excess * _gain).clamp(max=1.2)
-    dephasing = torch.randn_like(osc_phases) * noise_scale
+    R_distance = (R_current - _R_tgt).abs()
+    noise_scale = (R_distance * _gain).clamp(max=1.2)
+    if colored_noise is not None:
+        # Floor ensures colored noise is always present (preserves 1/f
+        # temporal structure). R-dependent scaling adds homeostatic amplitude
+        # modulation on top — slow enough not to whiten the spectrum.
+        noise_scale = noise_scale.clamp(min=0.3)
+        dephasing = colored_noise * noise_scale
+    else:
+        dephasing = torch.randn_like(osc_phases) * noise_scale
     osc_phases.add_(dephasing).remainder_(2 * math.pi)
     return osc_phases
 
@@ -408,6 +427,35 @@ class CognitiveCycle(nn.Module):
         self.register_buffer('_cached_metastability', torch.tensor(0.0))
         self.register_buffer('_cached_dephasing_gain', torch.tensor(1.5))
         self.register_buffer('_R_target', torch.tensor(c.target_R))
+
+        # ── Long R history for neuroscience diagnostics (DFA, spectral, etc.) ──
+        # Separate from the 50-sample buffer used for SD(R) — that one is tuned.
+        _buf_len = c.diagnostics_buffer_len
+        self.register_buffer('_R_long_history', torch.zeros(_buf_len))
+        self._R_long_ptr: int = 0
+
+        # ── Oscillator activity buffer for avalanche detection ──
+        # Sum of |sin(phase_i)| per tick — analogous to summed LFP/MEA activity.
+        # R(t) is too smooth for proper avalanche scaling; this captures bursts.
+        self.register_buffer('_activity_long_history', torch.zeros(_buf_len))
+        self._activity_long_ptr: int = 0
+
+        # ── v7: Multi-timescale OU dephasing cascade ──
+        # Superposition of 4 OU processes with log-spaced tau produces
+        # approximate 1/f^β noise (Kaulakys & Meskauskas 1998).
+        self._ou_cascade = None
+        if c.use_ou_dephasing:
+            from pyquifer.stochastic_resonance import OrnsteinUhlenbeckNoise
+            # σ²τ = const for each component → 1/f superposition
+            # (Kaulakys & Meskauskas 1998). C=2.0 chosen empirically to
+            # dominate Kuramoto mean-field smoothing on R(t).
+            _C = 2.0
+            self._ou_cascade = nn.ModuleList([
+                OrnsteinUhlenbeckNoise(dim=c.num_oscillators, tau=2.0, sigma=_C / 2.0**0.5),
+                OrnsteinUhlenbeckNoise(dim=c.num_oscillators, tau=10.0, sigma=_C / 10.0**0.5),
+                OrnsteinUhlenbeckNoise(dim=c.num_oscillators, tau=50.0, sigma=_C / 50.0**0.5),
+                OrnsteinUhlenbeckNoise(dim=c.num_oscillators, tau=200.0, sigma=_C / 200.0**0.5),
+            ])
 
         # ── Fix 12: Size-normalized metastability target ──
         # SD(R) ~ 1/sqrt(N) for finite Kuramoto (analytical result).
@@ -1210,6 +1258,24 @@ class CognitiveCycle(nn.Module):
             self._R_history[idx] = R_current.detach()
             self._R_history_ptr += 1
 
+            # Update long R history for neuroscience diagnostics
+            _buf_len = self.config.diagnostics_buffer_len
+            long_idx = self._R_long_ptr % _buf_len
+            self._R_long_history[long_idx] = R_current.detach()
+            self._R_long_ptr += 1
+
+            # Update oscillator activity buffer for avalanche detection
+            # v7: spike-based activity (Beggs & Plenz 2003) when enabled,
+            # else sum of |sin(phase_i)| as LFP analog.
+            if self.config.use_spike_activity:
+                from pyquifer.criticality import phase_activity_to_spikes
+                activity = phase_activity_to_spikes(self.oscillators.phases.detach())
+            else:
+                activity = self.oscillators.phases.detach().sin().abs().sum()
+            act_idx = self._activity_long_ptr % _buf_len
+            self._activity_long_history[act_idx] = activity
+            self._activity_long_ptr += 1
+
             # Update R EMA for Fix 9 (CFC theta derivation)
             self._R_ema.mul_(0.95).add_(0.05 * R_current.detach())
 
@@ -1224,12 +1290,18 @@ class CognitiveCycle(nn.Module):
                 # When SD(R) < target → increase dephasing (more variability needed)
                 # When SD(R) > target → decrease dephasing (too chaotic)
                 meta_error = self._effective_target_meta - observed_meta
-                dephasing_gain = (1.0 + meta_error * 5.0).clamp(0.5, 3.0)
+                dephasing_gain = (1.0 + meta_error * 8.0).clamp(0.5, 3.0)
                 self._cached_dephasing_gain.copy_(dephasing_gain)
 
             # Criticality feedback: dual-timescale control extracted into a
             # standalone function so torch.compile can fuse all ~15 element-wise
             # ops into 1-2 kernels.  See _criticality_feedback() docstring.
+            # v7: Generate colored noise from OU cascade if enabled
+            _colored = None
+            if self._ou_cascade is not None:
+                _colored = sum(ou.forward() for ou in self._ou_cascade)
+                _colored = _colored.to(self.oscillators.phases.device)
+
             _crit_fn = _compiled_criticality_feedback or _criticality_feedback
             _crit_fn(
                 self.oscillators.phases,
@@ -1238,6 +1310,7 @@ class CognitiveCycle(nn.Module):
                 R_current,
                 dephasing_gain=self._cached_dephasing_gain,
                 R_target=self._R_target,
+                colored_noise=_colored,
             )
 
         # ── Step 2b: Optional Koopman bifurcation detection ──
@@ -1446,7 +1519,7 @@ class CognitiveCycle(nn.Module):
 
         # Fix 7: pass criticality_distance for critical slowing down
         _crit_dist_f = float(criticality_distance) if isinstance(criticality_distance, torch.Tensor) else criticality_distance
-        dom_result = self.dominance(level_activations, compute_every=10, criticality_distance=_crit_dist_f)
+        dom_result = self.dominance(level_activations, compute_every=5, criticality_distance=_crit_dist_f)
         dominance_ratio = dom_result['dominance_ratio']  # keep tensor
         processing_mode = dom_result['mode']
 
@@ -2065,6 +2138,33 @@ class CognitiveCycle(nn.Module):
         _adapt_lr = adaptive_lr.mean().item()
         _mean_vol = vol_result['mean_volatility'].item()
         _tick_val = self.tick_count.item()
+
+        # ── Neuroscience diagnostics (every 100 ticks when buffer is full) ──
+        _neuro_metrics = {}
+        if self._R_long_ptr >= self.config.diagnostics_buffer_len and _tick_val % 100 == 0:
+            from pyquifer.neuro_diagnostics import (
+                spectral_exponent, dfa_exponent, lempel_ziv_complexity,
+                avalanche_statistics, complexity_entropy,
+            )
+            R_series = self._R_long_history.clone()
+            # Use oscillator activity signal for avalanche detection (LFP analog)
+            activity_series = self._activity_long_history.clone()
+            _se = spectral_exponent(R_series)
+            _dfa = dfa_exponent(R_series)
+            _lz = lempel_ziv_complexity(R_series)
+            _av = avalanche_statistics(activity_series)  # activity, NOT R
+            _h, _c = complexity_entropy(R_series)
+            _neuro_metrics = {
+                'spectral_exponent': _se,
+                'dfa_exponent': _dfa,
+                'lempel_ziv': _lz,
+                'avalanche_size_exp': _av['size_exponent'],
+                'avalanche_duration_exp': _av['duration_exponent'],
+                'avalanche_n': _av['n_avalanches'],
+                'permutation_entropy': _h,
+                'statistical_complexity': _c,
+            }
+
         _reset_s = sc['reset_strength'].item() if isinstance(sc['reset_strength'], torch.Tensor) else sc['reset_strength']
         _coup_sc = sc['coupling_scale'].item() if isinstance(sc['coupling_scale'], torch.Tensor) else sc['coupling_scale']
         _dom_ratio = dominance_ratio.item() if isinstance(dominance_ratio, torch.Tensor) else dominance_ratio
@@ -2176,6 +2276,7 @@ class CognitiveCycle(nn.Module):
                 **jepa_info,
                 **deep_aif_info,
                 **prospective_info,
+                'neuro_metrics': _neuro_metrics,
             },
         }
 

@@ -321,7 +321,7 @@ class DominanceDetector(nn.Module):
                  num_levels: int = 3,
                  num_bins: int = 8,
                  buffer_size: int = 200,
-                 hysteresis: float = 0.05):
+                 hysteresis: float = 0.03):
         """
         Args:
             num_levels: Number of hierarchy levels (bottom=sensory, top=abstract)
@@ -353,7 +353,7 @@ class DominanceDetector(nn.Module):
         # Instead of static 0.4/0.6 thresholds, derive from observed ratio distribution
         self._ratio_ema: float = 0.5       # Exponential moving average of ratio
         self._ratio_var_ema: float = 0.01   # EMA of variance (for adaptive band width)
-        self._ema_alpha: float = 0.05       # Smoothing factor
+        self._ema_alpha: float = 0.08       # Smoothing factor
         self._current_mode: str = 'balanced'
 
     def forward(self,

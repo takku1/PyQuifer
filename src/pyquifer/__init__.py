@@ -461,6 +461,12 @@ __all__ = [
     "AdapterGate",
     "AdapterConfig",
     "BlendState",
+    # Neuroscience Diagnostics (Tier 1 empirical metrics)
+    "spectral_exponent",
+    "dfa_exponent",
+    "lempel_ziv_complexity",
+    "avalanche_statistics",
+    "complexity_entropy",
 ]
 
 # Mapping from name to (module, attribute) for lazy loading
@@ -989,6 +995,13 @@ _LAZY_IMPORTS = {
     "AdapterGate": (".adapter_manager", "AdapterGate"),
     "AdapterConfig": (".adapter_manager", "AdapterConfig"),
     "BlendState": (".adapter_manager", "BlendState"),
+
+    # Neuroscience Diagnostics
+    "spectral_exponent": (".neuro_diagnostics", "spectral_exponent"),
+    "dfa_exponent": (".neuro_diagnostics", "dfa_exponent"),
+    "lempel_ziv_complexity": (".neuro_diagnostics", "lempel_ziv_complexity"),
+    "avalanche_statistics": (".neuro_diagnostics", "avalanche_statistics"),
+    "complexity_entropy": (".neuro_diagnostics", "complexity_entropy"),
 }
 
 # Cache for loaded attributes
