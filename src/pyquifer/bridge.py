@@ -123,6 +123,14 @@ class ModulationState:
     phases: Optional[torch.Tensor] = None  # (num_oscillators,)
     neuromodulator_levels: Optional[torch.Tensor] = None  # [DA, 5HT, NE, ACh, Cortisol]
 
+    # === Workspace / Organ state (when use_mcp_organs or use_global_workspace) ===
+    workspace_winner_id: Optional[str] = None
+    workspace_broadcast: Optional[torch.Tensor] = None
+
+    # === Basal ganglia gating (when use_gating_loop) ===
+    gating_winner_id: Optional[str] = None
+    gating_stn_active: bool = False
+
     # === Latency ===
     step_latency_ms: float = 0.0
 
@@ -440,6 +448,10 @@ class PyQuiferBridge(nn.Module):
                 tick=d['tick'],
                 phases=d['phases'],
                 neuromodulator_levels=d['neuromodulator_levels'],
+                workspace_winner_id=d.get('gw_winner'),
+                workspace_broadcast=d.get('gw_broadcast'),
+                gating_winner_id=str(d['bg_selected_channel']) if 'bg_selected_channel' in d else None,
+                gating_stn_active=d.get('bg_stn_active', False),
                 step_latency_ms=latency_ms,
             )
             self._last_diagnostics = {
@@ -488,6 +500,8 @@ class PyQuiferBridge(nn.Module):
                 tick=self.cycle._tick_py,
                 phases=self.cycle.oscillators.phases.detach(),
                 neuromodulator_levels=self.cycle.neuromodulation.levels.detach(),
+                workspace_winner_id=self.cycle._cached_gw_winner_id or None,
+                workspace_broadcast=self.cycle._cached_gw_broadcast,
                 step_latency_ms=latency_ms,
             )
 

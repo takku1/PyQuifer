@@ -52,6 +52,16 @@ class GenerativeWorldModel(nn.Module):
         # or a prediction of the noise/potential.
         self.oscillator_to_prediction = nn.Linear(total_oscillators, space_dim)
 
+        # Per-bank archetype projections (S-07): different archetype dimensions
+        # drive different frequency banks with learned per-bank influence vectors
+        self.archetype_to_bank = nn.ModuleList([
+            nn.Linear(space_dim, config.get("num_oscillators", 0), bias=False)
+            for config in bank_configs
+        ])
+
+        # Feedback gain for oscillator → archetype modulation (S-06)
+        self.feedback_gain = nn.Parameter(torch.tensor(0.01))
+
 
     def forward(self, 
                 input_noise_shape: tuple, 
@@ -59,7 +69,7 @@ class GenerativeWorldModel(nn.Module):
                 actualization_iterations: int, 
                 oscillator_steps: int = 100, 
                 noise_amplitude: float = 1.0, 
-                time_offset: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+                time_offset: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, torch.Tensor]:
         """
         Runs one cycle of the generative world model, demonstrating the feedback loop.
 
@@ -83,49 +93,50 @@ class GenerativeWorldModel(nn.Module):
         # noise_summary = generated_noise.mean(dim=tuple(range(1, len(generated_noise.shape)))) # Mean over spatial dims
 
         # 2. Update Oscillators (Harmonics/Resonance) with Multi-Frequency Clock
-        # TODO(S-07): Currently all banks get the same scalar input. For richer dynamics,
-        # use per-bank projections so different archetypes differentially influence
-        # different frequency bands (e.g., Shadow → low-freq somatic, Anima → theta).
-        archetype_sum = self.archetype_vector.sum() / self.space_dim * 0.1
-        
-        # Create a list of external inputs, one for each bank, on the correct device
+        # S-07: Per-bank archetype projections — each bank gets a distinct,
+        # learned projection of the archetype vector, scaled for stability
         external_inputs_for_banks = [
-            archetype_sum * torch.ones(bank.num_oscillators, device=self.archetype_vector.device) 
-            for bank in self.frequency_bank.banks
+            0.1 * self.archetype_to_bank[i](self.archetype_vector).squeeze(0)
+            for i, bank in enumerate(self.frequency_bank.banks)
         ]
 
         self.frequency_bank(external_inputs=external_inputs_for_banks, steps=oscillator_steps)
-        
+
         # Get the concatenated current phases of all oscillators from all banks
         all_oscillator_phases = torch.cat(self.frequency_bank.get_all_phases(), dim=0)
 
         # Get the aggregated Kuramoto Order Parameter
         kuramoto_r = self.frequency_bank.get_aggregated_order_parameter()
 
+        # S-06: Oscillator → archetype feedback (closed loop)
+        # Oscillator dynamics shape the actualization target, creating
+        # bidirectional coupling: archetype drives oscillators (S-07),
+        # oscillators modulate archetype (S-06)
+        oscillator_archetype_influence = self.oscillator_to_prediction(
+            all_oscillator_phases.unsqueeze(0)
+        )  # (1, space_dim)
+
+        # Apply feedback with stability clipping
+        feedback = self.feedback_gain * oscillator_archetype_influence
+        feedback = feedback.clamp(-0.5, 0.5)  # Prevent runaway
+
+        # Modulate the actualization target (not archetype_vector itself,
+        # which is a slow-learning parameter; the target is per-forward)
+        with torch.no_grad():
+            modulated_target = self.archetype_vector + feedback.detach()
+            self.mind_eye_actualization.target_vector.copy_(modulated_target)
 
         # --- Top-Down: The "Self" Vector Predicting ---
-        # 3. "Mind's Eye" Actualization
-        # For this model, let's explicitly set the actualization's target vector to our archetype
-        with torch.no_grad():
-            self.mind_eye_actualization.target_vector.copy_(self.archetype_vector)
-
-        # Run the actualization process
+        # 3. "Mind's Eye" Actualization with oscillator-modulated target
         actualized_state = self.mind_eye_actualization(
             initial_state=initial_specimen_state,
-            generated_noise_field=generated_noise, # ADDED
+            generated_noise_field=generated_noise,
             iterations=actualization_iterations,
             noise_amplitude=noise_amplitude,
             time_offset=time_offset
         )
-        
-        # Feedback from oscillators to shape the archetype or potential (Predictive Processing)
-        # Map aggregated oscillator phases to a "prediction" or "influence" on the archetype
-        # TODO(S-06): This influence is computed but not yet wired into the pipeline.
-        # Future: use it to modulate archetype_vector or actualization target, creating
-        # a closed loop where oscillator dynamics shape personality attractors.
-        oscillator_archetype_influence = self.oscillator_to_prediction(all_oscillator_phases.unsqueeze(0))  # (1, space_dim)
 
-        return actualized_state, generated_noise, all_oscillator_phases, kuramoto_r
+        return actualized_state, generated_noise, all_oscillator_phases, kuramoto_r, oscillator_archetype_influence
 
 if __name__ == '__main__':
     print("--- GenerativeWorldModel Example with FrequencyBank ---")
@@ -177,7 +188,7 @@ if __name__ == '__main__':
     print(f"Initial Specimen State: {initial_specimen_state.squeeze().detach().cpu().numpy()}")
 
     # Run one forward pass
-    final_state, noise_output, final_oscillator_phases, kuramoto_r = world_model(
+    final_state, noise_output, final_oscillator_phases, kuramoto_r, osc_influence = world_model(
         input_noise_shape,
         initial_specimen_state,
         actualization_iterations,
@@ -190,6 +201,7 @@ if __name__ == '__main__':
     print(f"Generated Noise (mean over spatial dims): {noise_output.mean().item():.4f}")
     print(f"Total Oscillator Phases shape: {final_oscillator_phases.shape}")
     print(f"Aggregated Kuramoto Order Parameter R: {kuramoto_r:.4f}")
+    print(f"Oscillator Archetype Influence shape: {osc_influence.shape}")
     print(f"Learned Archetype Vector in Actualization Module: {world_model.mind_eye_actualization.target_vector.squeeze().detach().cpu().numpy()}")
     print(f"Potential Field Attractor Positions (first): {world_model.potential_field.attractor_positions[0].detach().cpu().numpy()}")
 
@@ -207,7 +219,7 @@ if __name__ == '__main__':
         current_initial_state = torch.rand(1, space_dim).to(device)
         
         # Run the model
-        actualized_output, _, _, _ = world_model(
+        actualized_output, _, _, _, _ = world_model(
             input_noise_shape,
             current_initial_state,
             actualization_iterations=5,

@@ -340,6 +340,9 @@ __all__ = [
     "MotivationOrgan",
     "SelectionOrgan",
     "DiversityTracker",
+    # Phase 9b: MCP-as-Organ protocol
+    "MCPOrgan",
+    "MCPOrganConfig",
     # Phase 10: Multi-workspace ensemble + cross-bleed
     "StandingBroadcast",
     "CrossBleedGate",
@@ -461,6 +464,13 @@ __all__ = [
     "AdapterGate",
     "AdapterConfig",
     "BlendState",
+    # Basal Ganglia Gating Loop
+    "BasalGangliaLoop",
+    "GatingOutput",
+    # Phase-Lock Bus (multimodal coordinator)
+    "PhaseLockBus",
+    "BusConfig",
+    "BusOutput",
     # Neuroscience Diagnostics (Tier 1 empirical metrics)
     "spectral_exponent",
     "dfa_exponent",
@@ -851,6 +861,10 @@ _LAZY_IMPORTS = {
     "SelectionOrgan": (".organ", "SelectionOrgan"),
     "DiversityTracker": (".global_workspace", "DiversityTracker"),
 
+    # Phase 9b: MCP-as-Organ protocol
+    "MCPOrgan": (".mcp_organ", "MCPOrgan"),
+    "MCPOrganConfig": (".mcp_organ", "MCPOrganConfig"),
+
     # Phase 10: Multi-workspace ensemble + cross-bleed
     "StandingBroadcast": (".global_workspace", "StandingBroadcast"),
     "CrossBleedGate": (".global_workspace", "CrossBleedGate"),
@@ -995,6 +1009,15 @@ _LAZY_IMPORTS = {
     "AdapterGate": (".adapter_manager", "AdapterGate"),
     "AdapterConfig": (".adapter_manager", "AdapterConfig"),
     "BlendState": (".adapter_manager", "BlendState"),
+
+    # Basal Ganglia Gating Loop
+    "BasalGangliaLoop": (".basal_ganglia", "BasalGangliaLoop"),
+    "GatingOutput": (".basal_ganglia", "GatingOutput"),
+
+    # Phase-Lock Bus
+    "PhaseLockBus": (".phase_lock_bus", "PhaseLockBus"),
+    "BusConfig": (".phase_lock_bus", "BusConfig"),
+    "BusOutput": (".phase_lock_bus", "BusOutput"),
 
     # Neuroscience Diagnostics
     "spectral_exponent": (".neuro_diagnostics", "spectral_exponent"),

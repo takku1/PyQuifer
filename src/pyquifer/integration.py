@@ -159,6 +159,10 @@ class CycleConfig:
     cross_bleed_strength: float = 0.3      # How much background workspaces bleed into active
     standing_momentum: float = 0.9         # EMA momentum for standing broadcasts
 
+    # Phase 9b: MCP-as-Organ protocol
+    use_mcp_organs: bool = False           # Enable MCP resource endpoints as workspace organs
+    mcp_organ_latent_dim: int = 64         # Default latent dim for MCP organs
+
     # Phase 9b: Cross-module integration wiring
     use_circadian: bool = False            # ChronobiologicalSystem → consolidation timing
     use_personality_attractor: bool = False # PersonalityAttractor → metastability/personality
@@ -182,6 +186,27 @@ class CycleConfig:
     solver: str = "euler"                  # "euler", "rk4", "dopri5"
     use_complex_oscillators: bool = False  # Complex z=A*exp(i*phi) backend
     use_cuda_kernels: bool = False         # CUDA Kuramoto acceleration
+
+    # Basal ganglia gating loop
+    use_gating_loop: bool = False          # Enable BG-thalamic gating loop
+    gating_da_go_weight: float = 2.0      # D1 pathway DA sensitivity
+    gating_da_nogo_weight: float = 1.5    # D2 pathway DA sensitivity
+    gating_stn_surprise: float = 0.8      # Hyperdirect surprise threshold
+    gating_switching_penalty: float = 0.1  # Hysteresis for channel switching
+
+    # Multimodal Phase-Locking Bus
+    use_phase_lock_bus: bool = False
+    phase_lock_modality_dims: Optional[Dict[str, int]] = None  # None = {"text": state_dim}
+    phase_lock_sync_steps: int = 5
+    phase_lock_coherence_ema: float = 0.1
+
+    # Enhancement C: Energy-Metabolic Budget
+    use_metabolic_budget: bool = False     # Enable energy/metabolic constraints per tick
+    metabolic_capacity: float = 1.0       # Max energy budget (0-1 scale)
+    metabolic_recovery_rate: float = 0.02  # Energy recovered per idle tick
+    metabolic_oscillation_cost: float = 0.005  # Cost per tick of high-coherence oscillation
+    metabolic_ignition_cost: float = 0.05  # Cost of workspace ignition event
+    metabolic_broadcast_cost: float = 0.02 # Cost of workspace broadcast write
 
     # v7: Neuroscience dynamics alignment
     use_ou_dephasing: bool = False         # Multi-timescale OU noise cascade (1/f spectrum)
@@ -414,10 +439,18 @@ class CognitiveCycle(nn.Module):
         self.register_buffer('_scratch_sleep_signal', torch.tensor(0.0))
         self.register_buffer('_scratch_personality', torch.zeros(c.num_populations))
 
+        # Enhancement C: Metabolic budget state
+        self.register_buffer('_energy_budget', torch.tensor(c.metabolic_capacity))
+        self.register_buffer('_metabolic_debt', torch.tensor(0.0))
+
         # Cached consciousness metrics (updated every tick, readable from bridge)
         self.register_buffer('_cached_criticality_distance', torch.tensor(0.5))
         self.register_buffer('_cached_free_energy', torch.tensor(0.0))
         self.register_buffer('_cached_identity_strength', torch.tensor(0.0))
+
+        # Cached workspace state (updated when workspace competition runs)
+        self._cached_gw_winner_id: str = ""
+        self._cached_gw_broadcast: Optional[torch.Tensor] = None
 
         # ── Fix 6: R history circular buffer for metastability targeting ──
         # Track recent R values to compute SD(R) = observed metastability.
@@ -799,6 +832,18 @@ class CognitiveCycle(nn.Module):
                 manifold_dim=min(c.internal_dim, 8),
             )
 
+        # === Basal Ganglia Gating Loop ===
+        self._gating_loop = None
+        if c.use_gating_loop:
+            from pyquifer.basal_ganglia import BasalGangliaLoop
+            self._gating_loop = BasalGangliaLoop(
+                max_channels=8,
+                da_go_weight=c.gating_da_go_weight,
+                da_nogo_weight=c.gating_da_nogo_weight,
+                stn_surprise_threshold=c.gating_stn_surprise,
+                switching_penalty=c.gating_switching_penalty,
+            )
+
         # === Phase 11-18: New Module Wiring ===
         # Each flag gates a lazy import + instantiation.
         # Modules are called in tick() at the appropriate pipeline stage.
@@ -855,6 +900,19 @@ class CognitiveCycle(nn.Module):
                 binding_dim=c.state_dim,
                 num_oscillators_per_modality=min(c.num_oscillators, 16),
             )
+
+        # Phase-Lock Bus (multimodal coordinator)
+        self._phase_lock_bus = None
+        if c.use_phase_lock_bus:
+            from pyquifer.phase_lock_bus import PhaseLockBus, BusConfig
+            _mod_dims = c.phase_lock_modality_dims or {"text": c.state_dim}
+            self._phase_lock_bus = PhaseLockBus(BusConfig(
+                modality_dims=_mod_dims,
+                binding_dim=c.state_dim,
+                num_oscillators_per_modality=min(c.num_oscillators, 16),
+                num_sync_steps=c.phase_lock_sync_steps,
+                coherence_ema_alpha=c.phase_lock_coherence_ema,
+            ))
 
         # Phase 13: Deep active inference
         self._deep_aif = None
@@ -1009,7 +1067,11 @@ class CognitiveCycle(nn.Module):
         self._organs.append((organ, adapter))
 
     def _run_workspace_competition(self, sensory_input: torch.Tensor,
-                                    phases: torch.Tensor) -> Dict[str, Any]:
+                                    phases: torch.Tensor,
+                                    neuro_levels: Optional[torch.Tensor] = None,
+                                    coherence_val: float = 0.5,
+                                    input_novelty: float = 0.0,
+                                    ) -> Dict[str, Any]:
         """
         Run global workspace competition among registered organs.
 
@@ -1035,11 +1097,53 @@ class CognitiveCycle(nn.Module):
                 novelty=min(proposal.salience, 1.0),
             ).item()
 
+            # Scale write gate by bus coherence (if bus enabled)
+            if self._phase_lock_bus is not None:
+                _bus_mod = 0.5 + 0.5 * self._phase_lock_bus.get_write_gate_modulation()
+                gate_val = gate_val * _bus_mod
+
             # Apply diversity pressure
             boost = self._diversity_tracker.get_boost(organ.organ_id)
             proposal.salience = proposal.salience * gate_val + boost
 
             proposals.append((organ, adapter, proposal))
+
+        # 1b. Basal ganglia gating (if enabled) — modulates salience priors
+        bg_info = {}
+        if self._gating_loop is not None and proposals:
+            sal_t = torch.tensor(
+                [p.salience for _o, _a, p in proposals],
+                device=device, dtype=torch.float32,
+            )
+            cost_t = torch.tensor(
+                [p.cost for _o, _a, p in proposals],
+                device=device, dtype=torch.float32,
+            )
+            tags_list = [p.tags for _o, _a, p in proposals]
+            _nl = neuro_levels if neuro_levels is not None else torch.tensor(
+                [0.5, 0.5, 0.5, 0.5, 0.0], device=device,
+            )
+            gating_out = self._gating_loop.step(
+                saliences=sal_t,
+                costs=cost_t,
+                tags_list=tags_list,
+                neuro_levels=_nl,
+                coherence=coherence_val,
+                novelty=input_novelty,
+            )
+            # Apply salience priors from BG gating
+            for i, (_organ, _adapter, proposal) in enumerate(proposals):
+                if i < len(gating_out.salience_prior):
+                    proposal.salience *= (1.0 + float(gating_out.salience_prior[i]))
+            bg_info = {
+                'bg_selected_channel': gating_out.selected_channel,
+                'bg_thalamic_gate': gating_out.thalamic_gate,
+                'bg_stn_active': gating_out.stn_active,
+                'bg_da_bias': gating_out.da_bias,
+                'bg_switching_cost': gating_out.switching_cost,
+                'bg_mode_bias': gating_out.processing_mode_bias,
+                'bg_channel_activations': gating_out.channel_activations,
+            }
 
         # 2. Project to workspace dim and run competition
         ws_dim = self.config.workspace_dim
@@ -1081,12 +1185,19 @@ class CognitiveCycle(nn.Module):
                 if adapter is not None:
                     cc_loss = cc_loss + adapter.cycle_consistency_loss(proposal.content)
 
+        # 5. Collect organ standings for bridge exposure
+        organ_standings = {}
+        for organ, _adapter in self._organs:
+            organ_standings[organ.organ_id] = organ.standing_latent.clone().detach()
+
         return {
             'gw_broadcast': broadcast.detach(),
             'gw_winner': winner_id,
             'gw_saliences': saliences.detach().squeeze(0),
             'gw_did_ignite': gw_result['did_ignite'].any().item(),
             'gw_cycle_consistency_loss': cc_loss,
+            'organ_standings': organ_standings,
+            **bg_info,
         }
 
     def tick(self,
@@ -1393,6 +1504,19 @@ class CognitiveCycle(nn.Module):
             sb_result = self._sensory_binding({'default': sb_input.unsqueeze(0)})
             binding_info['total_binding'] = sb_result['total_binding'].detach()
 
+        # ── Step 4d2: Phase-Lock Bus (multimodal coordinator) ──
+        bus_info = {}
+        if self._phase_lock_bus is not None:
+            bus_input = enhanced_input.squeeze(0) if enhanced_input.dim() > 1 else enhanced_input
+            bus_modalities = {"text": bus_input.unsqueeze(0)}
+            bus_out = self._phase_lock_bus(bus_modalities)
+            enhanced_input = bus_out.fused_representation.squeeze(0)
+            bus_info = {
+                'bus_binding_matrix': bus_out.binding_matrix.detach(),
+                'bus_mean_coherence': bus_out.mean_coherence.detach(),
+                'bus_modality_count': bus_out.modality_count,
+            }
+
         # ── Step 4e: Phase 16 — Selective SSM / MoE (if enabled) ──
         ssm_moe_info = {}
         if self._selective_ssm is not None:
@@ -1559,9 +1683,37 @@ class CognitiveCycle(nn.Module):
         # ── Step 8b: Global Workspace competition (if enabled) ──
         gw_info = {}
         if self.config.use_global_workspace and self._organs:
-            gw_info = self._run_workspace_competition(sensory_input, phases)
+            _nov_f = float(sc['input_novelty']) if isinstance(sc['input_novelty'], torch.Tensor) else sc['input_novelty']
+            R_val_for_gw = float(coherence) if isinstance(coherence, torch.Tensor) else coherence
+            gw_info = self._run_workspace_competition(
+                sensory_input, phases,
+                neuro_levels=levels,
+                coherence_val=R_val_for_gw,
+                input_novelty=_nov_f,
+            )
+            # Cache for bridge minimal path
+            self._cached_gw_winner_id = gw_info.get('gw_winner', '')
+            self._cached_gw_broadcast = gw_info.get('gw_broadcast')
+
+            # BG mode bias can override DominanceDetector
+            if gw_info.get('bg_stn_active', False):
+                processing_mode = 'balanced'  # Emergency: neutral mode
+            elif 'bg_mode_bias' in gw_info:
+                _bg_mode = gw_info['bg_mode_bias']
+                if _bg_mode == 0:
+                    processing_mode = 'perception'
+                elif _bg_mode == 1:
+                    processing_mode = 'imagination'
+                # 2 = balanced, leave as-is (DominanceDetector's choice)
 
         # ── Step 8c: Multi-Workspace Ensemble (if enabled) ──
+        # Scale cross-bleed by bus coherence
+        if self._phase_lock_bus is not None and self._workspace_ensemble is not None:
+            _bleed_mod = self._phase_lock_bus.get_bleed_modulation()
+            self._workspace_ensemble.bleed_strength = (
+                self.config.cross_bleed_strength * (0.3 + 0.7 * _bleed_mod)
+            )
+
         ensemble_info = {}
         if self._workspace_ensemble is not None and self.config.use_global_workspace:
             n_ws = self.config.n_workspaces
@@ -1923,6 +2075,60 @@ class CognitiveCycle(nn.Module):
             else:
                 phase7_info['phase_cache_hit'] = False
 
+        # ── Step 12g: Metabolic budget (Enhancement C) ──
+        metabolic_info = {}
+        if c.use_metabolic_budget:
+            with torch.no_grad():
+                # Charge costs based on what happened this tick
+                tick_cost = torch.tensor(0.0, device=device)
+
+                # 1. Oscillation cost: scales with coherence (high R = locked = expensive)
+                R_f = float(R_val) if not isinstance(R_val, float) else R_val
+                tick_cost += c.metabolic_oscillation_cost * (0.5 + R_f)
+
+                # 2. Workspace ignition cost (if GW fired this tick)
+                if gw_info and gw_info.get('gw_winner', '') != '':
+                    tick_cost += c.metabolic_ignition_cost
+
+                # 3. Broadcast cost (ensemble cross-bleed writes)
+                if ensemble_info:
+                    tick_cost += c.metabolic_broadcast_cost
+
+                # 4. HPC cost: scales with free energy (high FE = harder inference)
+                fe_f = float(free_energy) if isinstance(free_energy, torch.Tensor) else free_energy
+                tick_cost += 0.002 * min(2.0, abs(fe_f))
+
+                # Deduct cost from budget
+                self._energy_budget.sub_(tick_cost.clamp(min=0.0))
+
+                # Recovery: passive energy restoration each tick
+                self._energy_budget.add_(c.metabolic_recovery_rate)
+
+                # Clamp to [0, capacity]
+                self._energy_budget.clamp_(0.0, c.metabolic_capacity)
+
+                # Track debt (how far below 50% we've gone)
+                half = c.metabolic_capacity * 0.5
+                if self._energy_budget < half:
+                    self._metabolic_debt.copy_(half - self._energy_budget)
+                else:
+                    self._metabolic_debt.fill_(0.0)
+
+                # Metabolic coupling to neuromodulation:
+                # Low energy → reduce precision (save resources), increase NE (arousal)
+                energy_ratio = self._energy_budget / c.metabolic_capacity
+                if energy_ratio < 0.3:
+                    # Low energy: dampen oscillator coupling (reduce synchronization cost)
+                    damping = (0.7 + energy_ratio).clamp(0.7, 1.0)
+                    self.oscillators.coupling_strength.mul_(damping)
+
+                metabolic_info = {
+                    'energy_budget': self._energy_budget.item(),
+                    'metabolic_debt': self._metabolic_debt.item(),
+                    'tick_cost': tick_cost.item(),
+                    'energy_ratio': energy_ratio.item(),
+                }
+
         # ── Step 13: Tick counter ──
         with torch.no_grad():
             self.tick_count.add_(1)
@@ -2268,6 +2474,7 @@ class CognitiveCycle(nn.Module):
                 'module_order_params': _mod_R.tolist() if _mod_R is not None else [],
                 **complex_osc_info,
                 **binding_info,
+                **bus_info,
                 **ssm_moe_info,
                 **appraisal_info,
                 **deliberation_info,
@@ -2276,6 +2483,7 @@ class CognitiveCycle(nn.Module):
                 **jepa_info,
                 **deep_aif_info,
                 **prospective_info,
+                **metabolic_info,
                 'neuro_metrics': _neuro_metrics,
             },
         }
