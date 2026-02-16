@@ -15,8 +15,9 @@ against neuroscience-informed target bands.
 
 import torch
 import pytest
-from pyquifer.integration import CycleConfig, CognitiveCycle
-from pyquifer import neuro_diagnostics as nd
+from pyquifer.runtime.config import CycleConfig
+from pyquifer.runtime.cycle import CognitiveCycle
+from pyquifer.diagnostics import neuroscience as nd
 
 # Number of ticks to establish regime statistics
 WARMUP_TICKS = 200

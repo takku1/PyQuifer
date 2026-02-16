@@ -2,7 +2,7 @@
 
 import torch
 import pytest
-from pyquifer.models import GenerativeWorldModel
+from pyquifer.memory.generative_world_model import GenerativeWorldModel
 
 SPACE_DIM = 3
 NOISE_SHAPE = (4, 4, 4)

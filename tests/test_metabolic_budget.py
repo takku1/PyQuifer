@@ -2,7 +2,8 @@
 
 import torch
 import pytest
-from pyquifer.integration import CycleConfig, CognitiveCycle
+from pyquifer.runtime.config import CycleConfig
+from pyquifer.runtime.cycle import CognitiveCycle
 
 
 @pytest.fixture

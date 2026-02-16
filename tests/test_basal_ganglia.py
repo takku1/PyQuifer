@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from pyquifer.basal_ganglia import BasalGangliaLoop, GatingOutput
+from pyquifer.dynamics.basal_ganglia import BasalGangliaLoop, GatingOutput
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +205,8 @@ class TestModeBias:
 class TestGatingInCycle:
     def test_gating_in_cycle(self):
         """Full tick with use_gating_loop=True, verify bg_* diagnostics."""
-        from pyquifer.integration import CognitiveCycle, CycleConfig
+        from pyquifer.runtime.cycle import CognitiveCycle
+        from pyquifer.runtime.config import CycleConfig
 
         config = CycleConfig.small()
         config.use_gating_loop = True
@@ -213,7 +214,7 @@ class TestGatingInCycle:
         cycle = CognitiveCycle(config)
 
         # Register a minimal organ so GW competition fires
-        from pyquifer.organ import HPCOrgan
+        from pyquifer.workspace.organ_base import HPCOrgan
         organ = HPCOrgan(latent_dim=32)
         cycle.register_organ(organ)
 
@@ -228,14 +229,15 @@ class TestGatingInCycle:
 
     def test_gating_disabled_no_overhead(self):
         """use_gating_loop=False → no bg_* in output."""
-        from pyquifer.integration import CognitiveCycle, CycleConfig
+        from pyquifer.runtime.cycle import CognitiveCycle
+        from pyquifer.runtime.config import CycleConfig
 
         config = CycleConfig.small()
         config.use_gating_loop = False
         config.use_global_workspace = True
         cycle = CognitiveCycle(config)
 
-        from pyquifer.organ import HPCOrgan
+        from pyquifer.workspace.organ_base import HPCOrgan
         organ = HPCOrgan(latent_dim=32)
         cycle.register_organ(organ)
 

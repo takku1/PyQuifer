@@ -2,8 +2,8 @@
 
 import pytest
 import torch
-from pyquifer.phase_lock_bus import PhaseLockBus, BusConfig, BusOutput
-from pyquifer.sensory_binding import MultimodalBinder
+from pyquifer.dynamics.phase_lock_bus import PhaseLockBus, BusConfig, BusOutput
+from pyquifer.cognition.binding.sensory import MultimodalBinder
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +129,8 @@ class TestPhaseLockBusIntegration:
 
     def test_bus_in_cycle_enabled(self):
         """CycleConfig(use_phase_lock_bus=True), tick() returns bus_* diagnostics."""
-        from pyquifer.integration import CycleConfig, CognitiveCycle
+        from pyquifer.runtime.config import CycleConfig
+        from pyquifer.runtime.cycle import CognitiveCycle
         cfg = CycleConfig(
             state_dim=32, belief_dim=16, semantic_dim=8,
             hierarchy_dims=[32, 16, 8],
@@ -147,7 +148,8 @@ class TestPhaseLockBusIntegration:
 
     def test_bus_disabled_no_overhead(self):
         """CycleConfig(use_phase_lock_bus=False), no bus_* in diagnostics."""
-        from pyquifer.integration import CycleConfig, CognitiveCycle
+        from pyquifer.runtime.config import CycleConfig
+        from pyquifer.runtime.cycle import CognitiveCycle
         cfg = CycleConfig(
             state_dim=32, belief_dim=16, semantic_dim=8,
             hierarchy_dims=[32, 16, 8],

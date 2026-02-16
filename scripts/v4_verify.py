@@ -3,8 +3,9 @@ import torch
 import math
 import time
 
-from pyquifer.integration import CognitiveCycle, CycleConfig
-from pyquifer.bridge import PyQuiferBridge
+from pyquifer.runtime.cycle import CognitiveCycle
+from pyquifer.runtime.config import CycleConfig
+from pyquifer.api.bridge import PyQuiferBridge
 
 print("=" * 70)
 print("  PyQuifer v4 Neuroscience Alignment Verification")

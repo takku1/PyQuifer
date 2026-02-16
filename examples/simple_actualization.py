@@ -2,7 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
-from pyquifer.models import GenerativeWorldModel
+from pyquifer.memory.generative_world_model import GenerativeWorldModel
 
 def run_simple_actualization_example():
     print("--- Running Simple Actualization Example ---")

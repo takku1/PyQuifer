@@ -8,8 +8,8 @@ change detection, staleness decay, workspace competition integration.
 import time
 import torch
 import pytest
-from pyquifer.mcp_organ import MCPOrgan, MCPOrganConfig
-from pyquifer.organ import Proposal, PreGWAdapter, OscillatoryWriteGate
+from pyquifer.workspace.organ_mcp import MCPOrgan, MCPOrganConfig
+from pyquifer.workspace.organ_base import Proposal, PreGWAdapter, OscillatoryWriteGate
 
 
 @pytest.fixture
@@ -215,7 +215,7 @@ class TestMCPOrganWorkspaceIntegration:
 
     def test_full_competition_round(self):
         """MCPOrgan + HPCOrgan compete in a minimal workspace."""
-        from pyquifer.organ import HPCOrgan
+        from pyquifer.workspace.organ_base import HPCOrgan
 
         mcp_config = MCPOrganConfig(
             organ_id="mcp:test:alerts",

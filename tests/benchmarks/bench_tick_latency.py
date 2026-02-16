@@ -13,8 +13,10 @@ import statistics
 import pytest
 import torch
 
-from pyquifer.integration import CognitiveCycle, CycleConfig, TickResult
-from pyquifer.bridge import PyQuiferBridge, sync_debug_mode
+from pyquifer.runtime.cycle import CognitiveCycle
+from pyquifer.runtime.config import CycleConfig
+from pyquifer.runtime.tick_result import TickResult
+from pyquifer.api.bridge import PyQuiferBridge, sync_debug_mode
 
 
 def _measure_latencies(fn, n_warmup=20, n_measure=200):

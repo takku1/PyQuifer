@@ -22,7 +22,7 @@ def smoke_test(num_ticks: int = 3) -> bool:
 
     # 1. Import bridge
     t0 = time.perf_counter()
-    from pyquifer.bridge import PyQuiferBridge, ModulationState
+    from pyquifer.api.bridge import PyQuiferBridge, ModulationState
     print(f"[OK] Bridge import: {(time.perf_counter() - t0)*1000:.0f}ms")
 
     # 2. Create bridge

@@ -9,7 +9,9 @@ Validates:
 
 import pytest
 import torch
-from pyquifer.integration import CognitiveCycle, CycleConfig, TickResult
+from pyquifer.runtime.cycle import CognitiveCycle
+from pyquifer.runtime.config import CycleConfig
+from pyquifer.runtime.tick_result import TickResult
 
 
 @pytest.fixture
@@ -123,7 +125,7 @@ class TestBridgeUnpacksTickResult:
 
     def test_bridge_step_returns_modulation_state(self):
         """Bridge.step() should return ModulationState from minimal tick."""
-        from pyquifer.bridge import PyQuiferBridge, ModulationState
+        from pyquifer.api.bridge import PyQuiferBridge, ModulationState
         bridge = PyQuiferBridge(CycleConfig.small())
         state_dim = bridge.config.state_dim
         x = torch.randn(state_dim)
@@ -135,7 +137,7 @@ class TestBridgeUnpacksTickResult:
 
     def test_bridge_step_diagnostic(self):
         """Bridge.step_diagnostic() should return both ModulationState + diagnostics."""
-        from pyquifer.bridge import PyQuiferBridge, ModulationState
+        from pyquifer.api.bridge import PyQuiferBridge, ModulationState
         bridge = PyQuiferBridge(CycleConfig.small())
         x = torch.randn(bridge.config.state_dim)
         mod_state, diagnostics = bridge.step_diagnostic(x)
