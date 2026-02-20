@@ -79,13 +79,17 @@ class NeuromodulatorDynamics(nn.Module):
 
         # Cross-modulator interaction matrix
         # rows = target, cols = source
+        # Key constraint: eigenvalues must all have Re < 0 for stability.
+        # Each row has negative self-diagonal to ensure decay dominates.
+        # Biologically: HPA axis negative feedback (Cort inhibits NE),
+        # 5-HT/DA mutual mild excitation, Cort as stress signal.
         self.interaction = nn.Parameter(torch.tensor([
             # DA    5HT   NE    ACh   Cort
-            [0.0,  -0.1,  0.2,  0.0, -0.2],  # DA: inhibited by 5HT, excited by NE
-            [0.1,   0.0, -0.1,  0.0,  0.0],  # 5HT: excited by DA
-            [0.2,   0.0,  0.0,  0.1,  0.3],  # NE: excited by DA, ACh, Cort
-            [0.1,   0.0,  0.1,  0.0, -0.1],  # ACh: excited by DA, NE
-            [-0.1,  0.1,  0.2,  0.0,  0.0],  # Cort: inhibited by DA, excited by 5HT, NE
+            [-0.1,  0.05, 0.05, 0.0, -0.1],  # DA: self-decay, mild boost from 5HT/NE, inhibited by Cort
+            [0.05, -0.1, -0.05, 0.0, -0.05],  # 5HT: boosted by DA, inhibited by NE/Cort
+            [0.05,  0.0, -0.15, 0.05,-0.1],  # NE: boosted by DA/ACh, self-decay, INHIBITED by Cort
+            [0.05,  0.0,  0.05,-0.1, -0.05],  # ACh: boosted by DA/NE, self-decay
+            [-0.05,-0.05, 0.1,  0.0, -0.15],  # Cort: inhibited by DA/5HT, excited by NE, strong self-decay
         ]))
 
     def step(self,
@@ -117,13 +121,23 @@ class NeuromodulatorDynamics(nn.Module):
         # Cross-modulator effects
         cross_effect = self.interaction @ self.levels
 
+        # Phasic gain diminishes as levels approach saturation (0 or 1).
+        # This prevents persistent mild signals from saturating all channels.
+        # headroom = distance to ceiling (for positive phasic) or floor (for negative)
+        headroom = torch.where(
+            phasic > 0,
+            1.0 - self.levels,  # room to grow
+            self.levels,        # room to shrink
+        )
+        scaled_phasic = phasic * 0.1 * headroom
+
         # Exponential decay toward baseline + phasic input + cross effects
         decay = self.dt / self.tau
         self.levels = (
             self.levels * (1 - decay) +
             self.baseline * decay +
-            phasic * 0.1 +
-            cross_effect * 0.05
+            scaled_phasic +
+            cross_effect * 0.02
         )
 
         # Clamp to valid range

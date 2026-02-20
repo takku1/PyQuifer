@@ -771,13 +771,27 @@ class PyQuiferBridge(nn.Module):
         """
         Map cognitive state to nucleus sampling threshold.
 
-        Near criticality = more creative = higher top_p
-        High coherence = more focused = lower top_p
+        Uses an S-curve so top_p is meaningfully expressive:
+          High coherence → "focus mode" (top_p ~0.70, tight sampling)
+          Low coherence  → "riff mode"  (top_p ~0.95, diverse search)
+          Near criticality → creativity bonus (+0.05)
+
+        S-curve centered at coherence=0.5, steepness=6 gives smooth
+        transition without instability at the extremes.
         """
-        base = 0.9
-        coherence_mod = -coherence * 0.1  # High coherence tightens
-        crit_mod = max(0, 1.0 - criticality_distance) * 0.05  # Near critical loosens
-        return max(0.5, min(1.0, base + coherence_mod + crit_mod))
+        import math
+        # S-curve: maps coherence [0,1] → top_p [0.95, 0.70]
+        # sigmoid centered at 0.5 with steepness 6
+        s = 1.0 / (1.0 + math.exp(-6.0 * (coherence - 0.5)))
+        # s=0 at low coherence → top_p=0.95 (riff mode)
+        # s=1 at high coherence → top_p=0.70 (focus mode)
+        top_p_min, top_p_max = 0.70, 0.95
+        base = top_p_max - s * (top_p_max - top_p_min)
+
+        # Criticality bonus: near critical (distance→0) adds creativity
+        crit_mod = max(0.0, 1.0 - criticality_distance) * 0.05
+
+        return max(0.50, min(1.0, base + crit_mod))
 
 
 class PyQuiferLogitsProcessor:

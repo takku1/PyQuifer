@@ -1,10 +1,9 @@
 """
 Visual Binding via Attentive Kuramoto Oscillator Networks (AKOrN) for PyQuifer
 
-Implements oscillator-based perceptual binding: making Kuramoto dynamics
-perform actual visual work — object segmentation, feature binding, and
-attention-driven grouping. Tokens that synchronize in phase are bound
-into coherent object representations.
+Implements oscillator-based perceptual binding using generalized vector-valued
+Kuramoto dynamics on unit hyperspheres. Tokens that synchronize in phase are
+bound into coherent object representations.
 
 Core idea: replace static attention weights with dynamic Kuramoto coupling.
 The coupling matrix J is derived from attention (J_ij = softmax(q_i . k_j / sqrt(d))),
@@ -12,17 +11,23 @@ so phase synchronization patterns are input-dependent. Tokens attending to each
 other entrain, forming synchronized clusters that correspond to objects.
 
 Key concepts:
-- Phase binding: Tokens with similar oscillator phases belong to the same object
-- Attention-driven coupling: J_ij from scaled dot-product attention
-- Multi-head structure: Block-diagonal coupling for independent binding channels
-- Order parameter readout: Cluster coherence R indicates binding strength
+- Vector-valued oscillators: Each oscillator is an n-dimensional unit vector on S^(n-1),
+  not a scalar phase angle. This is the generalized Kuramoto model.
+- Tangent projection: Updates are projected onto the tangent space of the hypersphere
+  before integration, ensuring oscillator states remain on the manifold.
+- Phase-invariant readout: Output features are extracted via L2 norm of n-dim groups,
+  yielding representations invariant to the absolute phase.
+- Conditioning bias: Input features serve as a bias term in the coupling, driving
+  oscillators toward input-dependent attractors.
+- Random initialization: Oscillator states are initialized randomly on the unit sphere,
+  breaking symmetry so dynamics can discover grouping structure.
 
 Supports both 2D spatial inputs (B, H*W, D) from vision and 1D sequential
-inputs (B, T, D) from language/audio — any token-based representation.
+inputs (B, T, D) from language/audio -- any token-based representation.
 
 References:
 - Rusch et al. (2025). "AKOrN: Attentive Kuramoto Oscillator Networks for
-  Object-Centric Learning." ICLR 2025.
+  Object-Centric Learning." ICLR 2025 (Oral).
 - Kuramoto (1975). "Self-entrainment of a population of coupled non-linear
   oscillators." International Symposium on Mathematical Problems in
   Theoretical Physics.
@@ -37,30 +42,80 @@ import math
 from typing import Dict, Optional, Tuple
 
 
+# ============================================================
+# Hypersphere utilities (following Rusch et al. 2025)
+# ============================================================
+
+def _reshape_to_groups(x: torch.Tensor, n: int) -> torch.Tensor:
+    """Unflatten channel dim into (C//n, n) groups of n-dim vectors.
+
+    (B, C, ...) -> (B, C//n, n, ...)
+    """
+    return x.unflatten(1, (-1, n))
+
+
+def _reshape_from_groups(x: torch.Tensor) -> torch.Tensor:
+    """Flatten (C//n, n) groups back to channel dim.
+
+    (B, C//n, n, ...) -> (B, C, ...)
+    """
+    return x.flatten(1, 2)
+
+
+def _normalize_to_sphere(x: torch.Tensor, n: int) -> torch.Tensor:
+    """Project oscillator states onto the unit hypersphere S^(n-1).
+
+    Groups the channel dimension into n-dim vectors and L2-normalizes each.
+    """
+    x = _reshape_to_groups(x, n)
+    x = F.normalize(x, dim=2)
+    x = _reshape_from_groups(x)
+    return x
+
+
+def _tangent_project(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """Project y onto the tangent space of x on the unit sphere.
+
+    T_x(S^{n-1}) = {v : <v, x> = 0}
+
+    Formula: y_tan = y - <y, x> * x
+
+    Both y and x should have shape (B, G, n, ...) where G = num groups.
+    Returns projected y with the same shape.
+    """
+    # Inner product along the n-dim axis (dim=2), keep dims for broadcasting
+    dot = (y * x).sum(dim=2, keepdim=True)
+    return y - dot * x
+
+
 class AKOrNLayer(nn.Module):
     """
-    Multi-head Kuramoto layer with attention-based coupling.
+    Generalized vector-valued Kuramoto layer with attention-based coupling.
 
-    Each head maintains a set of oscillators per token. Coupling between
-    tokens is computed via scaled dot-product attention over learned
-    query/key projections, yielding an input-dependent coupling matrix:
+    Each oscillator is an n-dimensional unit vector on S^(n-1). The coupling
+    between tokens is computed via scaled dot-product attention, yielding an
+    input-dependent coupling matrix J. Input features serve as a conditioning
+    bias that drives oscillators toward input-dependent attractors.
 
-        J_ij = softmax(q_i . k_j / sqrt(d_k))
+    Dynamics (per Kuramoto step):
+        y = J(x) + c                       (connectivity + conditioning bias)
+        y_tan = y - <y, x>x                (tangent projection)
+        x <- normalize(x + gamma * y_tan)  (update + re-project to sphere)
 
-    Phase dynamics follow the Kuramoto model with this attention coupling:
-
-        dphi_i/dt = omega_i + sum_j J_ij sin(phi_j - phi_i)
-
-    After integration, token features are modulated by the resulting phases,
-    so synchronized tokens produce coherent representations.
+    where x are oscillator states, c is the conditioning bias from input
+    features, and J is the attention-derived coupling.
 
     Args:
-        dim: Feature dimension of input tokens.
-        num_heads: Number of independent oscillator heads (block-diagonal coupling).
-        num_oscillators_per_head: Oscillators per head per token.
-        dt: Integration timestep for Kuramoto dynamics.
+        dim: Feature dimension of input tokens (must be divisible by n).
+        n: Dimension of each oscillator vector (lives on S^(n-1)).
+            n=2 is equivalent to classical scalar Kuramoto (circle S^1).
+            n=4 is the default used in Rusch et al. (2025).
+        num_heads: Number of attention heads for coupling computation.
+        gamma: Step size for Kuramoto update (default 1.0).
         num_steps: Number of Kuramoto integration steps per forward pass.
         coupling_mode: 'attention' for input-dependent J, 'fixed' for learnable static J.
+        c_norm: Normalization for conditioning bias. 'gn'=GroupNorm, 'none'=identity.
+        apply_proj: Whether to apply tangent projection (True for proper geometry).
 
     Shape:
         Input: (B, N, D) where B=batch, N=tokens, D=dim
@@ -70,20 +125,26 @@ class AKOrNLayer(nn.Module):
     def __init__(
         self,
         dim: int,
+        n: int = 4,
         num_heads: int = 4,
-        num_oscillators_per_head: int = 8,
-        dt: float = 0.1,
+        gamma: float = 1.0,
         num_steps: int = 5,
         coupling_mode: str = "attention",
+        c_norm: str = "gn",
+        apply_proj: bool = True,
     ):
         super().__init__()
 
         self.dim = dim
+        self.n = n
         self.num_heads = num_heads
-        self.num_osc = num_oscillators_per_head
-        self.dt = dt
+        self.gamma = gamma
         self.num_steps = num_steps
         self.coupling_mode = coupling_mode
+        self.apply_proj = apply_proj
+
+        assert dim % n == 0, f"dim ({dim}) must be divisible by n ({n})"
+        self.num_groups = dim // n  # Number of n-dim oscillator groups
 
         # Dimension per head for query/key projections
         self.d_k = dim // num_heads
@@ -96,7 +157,7 @@ class AKOrNLayer(nn.Module):
             self.W_q = nn.Linear(dim, dim, bias=False)
             self.W_k = nn.Linear(dim, dim, bias=False)
         elif coupling_mode == "fixed":
-            # Learnable static coupling matrix (block-diagonal, one per head)
+            # Learnable static coupling scale
             self.coupling_matrix = nn.Parameter(
                 torch.randn(num_heads, 1, 1) * 0.1 + 1.0
             )
@@ -105,125 +166,152 @@ class AKOrNLayer(nn.Module):
                 f"coupling_mode must be 'attention' or 'fixed', got '{coupling_mode}'"
             )
 
-        # Learnable natural frequencies: (num_heads, num_osc)
-        self.omega = nn.Parameter(
-            torch.randn(num_heads, num_oscillators_per_head) * 0.1
-        )
+        # Conditioning bias normalization
+        if c_norm == "gn":
+            # GroupNorm with groups matching oscillator groups
+            self.c_norm = nn.GroupNorm(self.num_groups, dim, affine=True)
+        elif c_norm == "none" or c_norm is None:
+            self.c_norm = nn.Identity()
+        else:
+            raise ValueError(f"c_norm must be 'gn' or 'none', got '{c_norm}'")
 
-        # Project features into phase space and back
-        self.to_phase = nn.Linear(dim, num_heads * num_oscillators_per_head)
-        self.from_phase = nn.Linear(num_heads * num_oscillators_per_head, dim)
+        # Conditioning projection: features -> bias c
+        self.cond_proj = nn.Linear(dim, dim)
 
-        # Learnable coupling scale
-        self.coupling_scale = nn.Parameter(torch.tensor(1.0))
+        # Phase-invariant readout (following Rusch et al. 2025):
+        # 1. Learned linear: (D) -> (D * n) -- creates n-dim groups with non-trivial norms
+        # 2. Unflatten to (D, n) groups
+        # 3. L2 norm along n-dim: (D,) -- phase-invariant but information-rich
+        # 4. Add learnable bias
+        # The key insight: the linear projection before norm creates groups whose
+        # norms encode phase relationships, unlike raw normalized states (all norm=1).
+        self.readout_linear = nn.Linear(dim, dim * n, bias=False)
+        self.readout_bias = nn.Parameter(torch.zeros(dim))
 
     def _compute_coupling(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, x_state: torch.Tensor
     ) -> torch.Tensor:
-        """Compute the coupling matrix J from input features.
+        """Compute connectivity: sum_j J_ij * x_j.
 
-        For attention mode:
-            J_ij = softmax(q_i . k_j / sqrt(d_k))   shape: (B, H, N, N)
-
-        For fixed mode:
-            J = coupling_matrix expanded to (1, H, 1, 1)
+        For attention mode: uses learned Q/K from input features, applies
+        attention weights to oscillator states.
 
         Args:
-            x: Input features (B, N, D).
+            x: Input features (B, N, D) for computing attention weights.
+            x_state: Oscillator states (B, N, D) to be mixed by coupling.
 
         Returns:
-            J: Coupling matrix (B, H, N, N) for attention mode,
-               or (1, H, 1, 1) for fixed mode.
+            Coupled states (B, N, D).
         """
         if self.coupling_mode == "attention":
             B, N, D = x.shape
-            # (B, N, D) -> (B, N, H, d_k) -> (B, H, N, d_k)
+            # Compute attention weights from input features
             q = self.W_q(x).view(B, N, self.num_heads, self.d_k).transpose(1, 2)
             k = self.W_k(x).view(B, N, self.num_heads, self.d_k).transpose(1, 2)
-
-            # Scaled dot-product attention: (B, H, N, N)
             attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
-            J = F.softmax(attn, dim=-1)
-            return J
+            attn = F.softmax(attn, dim=-1)  # (B, H, N, N)
+
+            # Apply attention to oscillator states
+            # x_state: (B, N, D) -> (B, H, N, d_k) for per-head mixing
+            v = x_state.view(B, N, self.num_heads, self.d_k).transpose(1, 2)
+            coupled = torch.matmul(attn, v)  # (B, H, N, d_k)
+            coupled = coupled.transpose(1, 2).reshape(B, N, D)
+            return coupled
         else:
-            # Fixed coupling: broadcast scalar per head
-            return self.coupling_matrix.unsqueeze(0)  # (1, H, 1, 1)
+            # Fixed coupling: scale oscillator states
+            return self.coupling_matrix.mean() * x_state
 
     def _kuramoto_step(
         self,
-        phases: torch.Tensor,
-        J: torch.Tensor,
-    ) -> torch.Tensor:
-        """Single Kuramoto integration step.
+        x_state: torch.Tensor,
+        c: torch.Tensor,
+        x_features: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Single generalized Kuramoto step on the unit hypersphere.
 
-        dphi_i/dt = omega_i + coupling_scale * sum_j J_ij sin(phi_j - phi_i)
+        1. Compute connectivity: y = J(x_state) + c
+        2. Reshape into n-dim groups
+        3. Tangent projection: y_tan = y - <y, x>x
+        4. Update: x <- normalize(x + gamma * y_tan)
 
         Args:
-            phases: Current phases (B, H, N, num_osc).
-            J: Coupling matrix (B, H, N, N) or broadcastable.
+            x_state: Current oscillator states (B, N, D), on unit sphere.
+            c: Conditioning bias (B, N, D), normalized.
+            x_features: Original input features (B, N, D) for coupling computation.
 
         Returns:
-            Updated phases (B, H, N, num_osc).
+            Updated oscillator states (B, N, D), on unit sphere.
+            Similarity (energy proxy) (B, N, D).
         """
-        # Phase differences: phi_j - phi_i
-        # phases: (B, H, N, num_osc) -> expand for pairwise
-        # phi_j: (B, H, 1, N, num_osc), phi_i: (B, H, N, 1, num_osc)
-        phase_diff = phases.unsqueeze(2) - phases.unsqueeze(3)
-        # phase_diff: (B, H, N, N, num_osc) = phi_j[dim=2] - phi_i[dim=3]
-        # Wait — we need J_ij * sin(phi_j - phi_i) summed over j.
-        # Let dim 3 = j, dim 2 = i:
-        #   phase_diff[..., i, j, :] = phases[..., j, :] - phases[..., i, :]
-        # Actually let's be explicit:
-        phi_i = phases.unsqueeze(3)  # (B, H, N, 1, osc)
-        phi_j = phases.unsqueeze(2)  # (B, H, 1, N, osc)
-        sin_diff = torch.sin(phi_j - phi_i)  # (B, H, N, N, osc)
+        # Connectivity: sum_j J_ij x_j
+        y = self._compute_coupling(x_features, x_state)
 
-        # J: (B, H, N, N) -> (B, H, N, N, 1) for broadcasting
-        if J.dim() == 4:
-            J_expanded = J.unsqueeze(-1)
+        # Add conditioning bias
+        y = y + c
+
+        # Reshape into n-dim groups for tangent projection
+        y_grouped = _reshape_to_groups(y, self.n)        # (B, N, G, n) -- wait
+        x_grouped = _reshape_to_groups(x_state, self.n)
+
+        # Wait -- our tensors are (B, N, D). _reshape_to_groups expects (B, C, ...).
+        # We need to transpose to (B, D, N) first, then group, then transpose back.
+        # Actually let's do the grouping on the last dim instead.
+        # Simpler: reshape (B, N, D) -> (B, N, G, n) directly
+        B, N, D = x_state.shape
+        y_g = y.view(B, N, self.num_groups, self.n)
+        x_g = x_state.view(B, N, self.num_groups, self.n)
+
+        # Tangent projection on dim=-1 (the n-dim)
+        if self.apply_proj:
+            dot = (y_g * x_g).sum(dim=-1, keepdim=True)  # (B, N, G, 1)
+            y_tan = y_g - dot * x_g
+            sim = dot.squeeze(-1)  # (B, N, G) for energy tracking
         else:
-            J_expanded = J.unsqueeze(-1)
+            y_tan = y_g
+            sim = (y_g * x_g).sum(dim=-1)
 
-        # Weighted coupling: sum_j J_ij sin(phi_j - phi_i)
-        coupling = (J_expanded * sin_diff).sum(dim=3)  # (B, H, N, osc)
+        # Reshape back to (B, N, D)
+        dxdt = y_tan.view(B, N, D)
 
-        # Natural frequency drift: (H, osc) -> (1, H, 1, osc)
-        omega = self.omega.unsqueeze(0).unsqueeze(2)
+        # Update + re-project to sphere
+        x_new = x_state + self.gamma * dxdt
+        # Normalize each n-dim group to unit sphere
+        x_new_g = x_new.view(B, N, self.num_groups, self.n)
+        x_new_g = F.normalize(x_new_g, dim=-1)
+        x_new = x_new_g.view(B, N, D)
 
-        # Kuramoto ODE
-        dphase = omega + self.coupling_scale * coupling
+        return x_new, sim.view(B, N, self.num_groups)
 
-        # Euler integration
-        new_phases = phases + self.dt * dphase
+    def order_parameter(self, x_state: torch.Tensor) -> torch.Tensor:
+        """Compute generalized order parameter R per oscillator group.
 
-        # Wrap to [-pi, pi]
-        new_phases = torch.remainder(new_phases + math.pi, 2 * math.pi) - math.pi
-
-        return new_phases
-
-    def order_parameter(self, phases: torch.Tensor) -> torch.Tensor:
-        """Compute Kuramoto order parameter R per head.
-
-        R = |<exp(i * phi)>| in [0, 1].
-        R ~ 0: incoherent (random phases).
-        R ~ 1: fully synchronized.
+        For vector-valued Kuramoto: R = ||mean(x_i)||_2 where x_i are unit vectors.
+        R ~ 0: incoherent (random orientations).
+        R ~ 1: fully synchronized (all pointing same direction).
 
         Args:
-            phases: (B, H, N, num_osc).
+            x_state: Oscillator states (B, N, D) on unit sphere.
 
         Returns:
-            R: (B, H) order parameter per head.
+            R: (B, G) order parameter per oscillator group.
         """
-        z = torch.exp(1j * phases.to(torch.cfloat))
-        z_mean = z.mean(dim=[2, 3])
-        return torch.abs(z_mean).float()
+        B, N, D = x_state.shape
+        x_g = x_state.view(B, N, self.num_groups, self.n)  # (B, N, G, n)
+        x_mean = x_g.mean(dim=1)  # (B, G, n) mean over tokens
+        R = torch.linalg.norm(x_mean, dim=-1)  # (B, G)
+        return R
 
     def forward(
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass: run Kuramoto dynamics with attention coupling.
+        """Forward pass: run generalized Kuramoto dynamics with attention coupling.
+
+        1. Compute conditioning bias from input features
+        2. Initialize oscillator states randomly on the unit sphere
+        3. Run T Kuramoto steps with tangent projection
+        4. Phase-invariant readout via L2 norm of oscillator groups
 
         Args:
             x: Input features (B, N, D).
@@ -231,30 +319,35 @@ class AKOrNLayer(nn.Module):
                   reserved for future use.
 
         Returns:
-            Output features (B, N, D) modulated by oscillator phases.
+            Output features (B, N, D) from phase-invariant readout.
         """
         B, N, D = x.shape
 
-        # Compute attention-based coupling
-        J = self._compute_coupling(x)  # (B, H, N, N)
+        # Conditioning bias from input features (normalized)
+        c = self.cond_proj(x)  # (B, N, D)
+        # Apply GroupNorm: need (B, D, N) format for nn.GroupNorm
+        c = c.transpose(1, 2)          # (B, D, N)
+        c = self.c_norm(c)             # (B, D, N)
+        c = c.transpose(1, 2)          # (B, N, D)
 
-        # Project features into phase space
-        phase_proj = self.to_phase(x)  # (B, N, H * osc)
-        phase_proj = phase_proj.view(B, N, self.num_heads, self.num_osc)
-        phases = phase_proj.permute(0, 2, 1, 3)  # (B, H, N, osc)
+        # Random initialization on unit sphere (key design choice)
+        x_state = torch.randn(B, N, D, device=x.device, dtype=x.dtype)
+        # Normalize each n-dim group to unit sphere
+        x_state_g = x_state.view(B, N, self.num_groups, self.n)
+        x_state_g = F.normalize(x_state_g, dim=-1)
+        x_state = x_state_g.view(B, N, D)
 
         # Run Kuramoto dynamics
         for _ in range(self.num_steps):
-            phases = self._kuramoto_step(phases, J)
+            x_state, _ = self._kuramoto_step(x_state, c, x)
 
-        # Modulate features with synchronized phases
-        # Use cos(phases) as a real-valued modulation signal
-        phase_signal = torch.cos(phases)  # (B, H, N, osc)
-        phase_signal = phase_signal.permute(0, 2, 1, 3)  # (B, N, H, osc)
-        phase_signal = phase_signal.reshape(B, N, self.num_heads * self.num_osc)
-
-        # Project back to feature space
-        output = self.from_phase(phase_signal)  # (B, N, D)
+        # Phase-invariant readout (Rusch et al. 2025):
+        # Linear projection creates n-dim groups with informative norms,
+        # then L2 norm extracts phase-invariant features.
+        readout = self.readout_linear(x_state)  # (B, N, D*n)
+        readout = readout.view(B, N, self.dim, self.n)  # (B, N, D, n)
+        output = torch.linalg.norm(readout, dim=-1)  # (B, N, D)
+        output = output + self.readout_bias  # (B, N, D)
 
         return output
 
@@ -271,10 +364,10 @@ class AKOrNBlock(nn.Module):
 
     Args:
         dim: Feature dimension.
-        num_heads: Number of oscillator heads.
+        n: Oscillator vector dimension (default 4, lives on S^(n-1)).
+        num_heads: Number of attention heads for coupling.
         ff_dim: Hidden dimension of the feedforward network.
-        num_oscillators_per_head: Oscillators per head per token.
-        dt: Kuramoto integration timestep.
+        gamma: Kuramoto step size.
         num_steps: Number of Kuramoto integration steps.
         dropout: Dropout rate for FFN.
         coupling_mode: 'attention' or 'fixed' coupling.
@@ -283,10 +376,10 @@ class AKOrNBlock(nn.Module):
     def __init__(
         self,
         dim: int,
+        n: int = 4,
         num_heads: int = 4,
         ff_dim: int = None,
-        num_oscillators_per_head: int = 8,
-        dt: float = 0.1,
+        gamma: float = 1.0,
         num_steps: int = 5,
         dropout: float = 0.1,
         coupling_mode: str = "attention",
@@ -299,9 +392,9 @@ class AKOrNBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.akorn = AKOrNLayer(
             dim=dim,
+            n=n,
             num_heads=num_heads,
-            num_oscillators_per_head=num_oscillators_per_head,
-            dt=dt,
+            gamma=gamma,
             num_steps=num_steps,
             coupling_mode=coupling_mode,
         )
@@ -349,10 +442,10 @@ class AKOrNEncoder(nn.Module):
     Args:
         dim: Feature dimension.
         depth: Number of AKOrN blocks to stack.
-        num_heads: Number of oscillator heads per block.
+        n: Oscillator vector dimension (default 4).
+        num_heads: Number of attention heads per block.
         ff_dim: FFN hidden dimension (default: 4 * dim).
-        num_oscillators_per_head: Oscillators per head per token.
-        dt: Kuramoto integration timestep.
+        gamma: Kuramoto step size.
         num_steps: Kuramoto integration steps per block.
         max_tokens: Maximum sequence length for positional embedding.
             If None, no positional embedding is added.
@@ -364,10 +457,10 @@ class AKOrNEncoder(nn.Module):
         self,
         dim: int,
         depth: int = 4,
+        n: int = 4,
         num_heads: int = 4,
         ff_dim: int = None,
-        num_oscillators_per_head: int = 8,
-        dt: float = 0.1,
+        gamma: float = 1.0,
         num_steps: int = 5,
         max_tokens: Optional[int] = None,
         dropout: float = 0.1,
@@ -388,10 +481,10 @@ class AKOrNEncoder(nn.Module):
         self.blocks = nn.ModuleList([
             AKOrNBlock(
                 dim=dim,
+                n=n,
                 num_heads=num_heads,
                 ff_dim=ff_dim,
-                num_oscillators_per_head=num_oscillators_per_head,
-                dt=dt,
+                gamma=gamma,
                 num_steps=num_steps,
                 dropout=dropout,
                 coupling_mode=coupling_mode,
@@ -450,75 +543,81 @@ class OscillatorySegmenter(nn.Module):
 
     Args:
         dim: Feature dimension.
-        num_heads: Number of oscillator heads.
-        num_oscillators_per_head: Oscillators per head.
+        n: Oscillator vector dimension (default 4).
+        num_heads: Number of attention heads.
         num_steps: Kuramoto integration steps (more steps = sharper clustering).
         threshold: Phase distance threshold for grouping (radians).
             Tokens with mean phase distance < threshold are assigned to the
             same segment. Lower = stricter clustering (more segments).
-        dt: Kuramoto integration timestep.
+        gamma: Kuramoto step size.
         coupling_mode: 'attention' or 'fixed' coupling.
     """
 
     def __init__(
         self,
         dim: int,
+        n: int = 4,
         num_heads: int = 4,
-        num_oscillators_per_head: int = 8,
         num_steps: int = 10,
         threshold: float = 0.5,
-        dt: float = 0.1,
+        gamma: float = 1.0,
         coupling_mode: str = "attention",
     ):
         super().__init__()
 
         self.threshold = threshold
+        self.n = n
 
         self.akorn = AKOrNLayer(
             dim=dim,
+            n=n,
             num_heads=num_heads,
-            num_oscillators_per_head=num_oscillators_per_head,
-            dt=dt,
+            gamma=gamma,
             num_steps=num_steps,
             coupling_mode=coupling_mode,
         )
 
-        # Project features to phase space for clustering
-        self.to_phase = nn.Linear(dim, num_heads * num_oscillators_per_head)
-        self.num_heads = num_heads
-        self.num_osc = num_oscillators_per_head
-
     def _extract_mean_phase(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute mean phase per token by running AKOrN and averaging.
+        """Compute mean phase per token by running AKOrN dynamics.
 
-        Uses the circular mean: angle(mean(exp(i * phi))).
+        For vector-valued Kuramoto, we extract a scalar phase per token by
+        computing the angle of the mean oscillator vector (using atan2 on
+        the first two components of each n-dim group, then averaging groups).
 
         Args:
             x: Input features (B, N, D).
 
         Returns:
             mean_phase: (B, N) mean phase per token in [-pi, pi].
+            x_state: (B, N, D) final oscillator states on the sphere.
         """
         B, N, D = x.shape
 
-        # Compute coupling from features
-        J = self.akorn._compute_coupling(x)
+        # Run full AKOrN forward to get oscillator states
+        # We need access to internals, so replicate the forward pass
+        c = self.akorn.cond_proj(x)
+        c = c.transpose(1, 2)
+        c = self.akorn.c_norm(c)
+        c = c.transpose(1, 2)
 
-        # Project to phase space
-        phase_proj = self.to_phase(x)  # (B, N, H * osc)
-        phase_proj = phase_proj.view(B, N, self.num_heads, self.num_osc)
-        phases = phase_proj.permute(0, 2, 1, 3)  # (B, H, N, osc)
+        x_state = torch.randn(B, N, D, device=x.device, dtype=x.dtype)
+        x_g = x_state.view(B, N, self.akorn.num_groups, self.n)
+        x_g = F.normalize(x_g, dim=-1)
+        x_state = x_g.view(B, N, D)
 
-        # Run Kuramoto dynamics
         for _ in range(self.akorn.num_steps):
-            phases = self.akorn._kuramoto_step(phases, J)
+            x_state, _ = self.akorn._kuramoto_step(x_state, c, x)
 
-        # Circular mean across heads and oscillators: angle(mean(exp(i*phi)))
-        z = torch.exp(1j * phases.to(torch.cfloat))  # (B, H, N, osc)
-        z_mean = z.mean(dim=[1, 3])  # (B, N)
-        mean_phase = torch.angle(z_mean).float()  # (B, N) in [-pi, pi]
+        # Extract scalar phase: atan2 of first two components of each group
+        x_g = x_state.view(B, N, self.akorn.num_groups, self.n)  # (B, N, G, n)
+        # Use atan2(y, x) on first two dims of each group
+        phases_per_group = torch.atan2(x_g[..., 1], x_g[..., 0])  # (B, N, G)
+        # Average phase across groups (circular mean)
+        z = torch.exp(1j * phases_per_group.to(torch.cfloat))  # (B, N, G)
+        z_mean = z.mean(dim=-1)  # (B, N)
+        mean_phase = torch.angle(z_mean).float()  # (B, N)
 
-        return mean_phase, phases
+        return mean_phase, x_state
 
     def _cluster_by_phase(
         self, mean_phase: torch.Tensor

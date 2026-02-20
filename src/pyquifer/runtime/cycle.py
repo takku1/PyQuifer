@@ -1051,11 +1051,17 @@ class CognitiveCycle(nn.Module):
         # ── Step 3: Neuromodulation ──
         # Update neuromodulator levels based on current signals
         # reward/novelty/threat/success drive DA/5-HT/NE/ACh/Cortisol
+        # Derive novelty from sensory input magnitude (non-zero input = something happening)
+        _sensory_mag = float(sensory_input.abs().mean())
+        _novelty = min(1.0, _sensory_mag * 0.5 + abs(reward) * 0.3)
+        # Threat from cached free energy (previous tick's prediction error)
+        _cached_fe = float(self._cached_free_energy)
+        _threat = min(1.0, max(0.0, _cached_fe * 0.3))
         neuro_state = self.neuromodulation.step(
             reward_signal=min(1.0, max(-1.0, reward)),
-            novelty_signal=min(1.0, max(0.0, abs(reward) * 0.5)),
-            threat_signal=0.0,
-            success_signal=min(1.0, max(0.0, reward)),
+            novelty_signal=_novelty,
+            threat_signal=_threat,
+            success_signal=min(1.0, max(0.0, reward + 0.1)),  # mild baseline success (alive = ok)
         )
 
         # Extract neuromodulator levels: [DA, 5HT, NE, ACh, Cortisol]
@@ -2153,21 +2159,27 @@ class CognitiveCycle(nn.Module):
         """
         Map consciousness state to LLM temperature.
 
-        High coherence + near criticality → lower temperature (focused)
-        Low coherence + far from criticality → higher temperature (creative)
+        High coherence → focused (temp ~0.4)
+        Low coherence  → creative (temp ~1.1)
+        Near criticality → slight creativity bonus (+0.15)
 
+        Smooth inverse mapping with wider range than before.
         Accepts both float and tensor inputs. Returns float.
         """
-        # Base temperature from coherence (inverted: high coherence = low temp)
-        base_temp = 1.0 - 0.5 * coherence  # [0.5, 1.0]
-
-        # Criticality modulation: near critical = slightly more creative
-        if isinstance(criticality_distance, torch.Tensor):
-            crit_mod = 0.1 * (1.0 - criticality_distance).clamp(min=0)
-            temp = (base_temp + crit_mod).clamp(min=0.1, max=2.0).item()
+        # Base temperature from coherence: [0.4, 1.1]
+        # Wider range than old [0.5, 1.0] for more expressivity
+        if isinstance(coherence, torch.Tensor):
+            base_temp = 1.1 - 0.7 * coherence  # [0.4, 1.1]
         else:
-            crit_mod = 0.1 * max(0, 1.0 - criticality_distance)
-            temp = max(0.1, min(2.0, base_temp + crit_mod))
+            base_temp = 1.1 - 0.7 * coherence
+
+        # Criticality modulation: near critical = more creative
+        if isinstance(criticality_distance, torch.Tensor):
+            crit_mod = 0.15 * (1.0 - criticality_distance).clamp(min=0)
+            temp = (base_temp + crit_mod).clamp(min=0.2, max=1.5).item()
+        else:
+            crit_mod = 0.15 * max(0, 1.0 - criticality_distance)
+            temp = max(0.2, min(1.5, base_temp + crit_mod))
         return temp
 
     def _compute_personality_blend(self, dominant_state: int,

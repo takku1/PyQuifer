@@ -46,6 +46,9 @@ dev = [
     "pytest-timeout>=2.2.0",
     "matplotlib>=3.5.0",
 ]
+adapters = [
+    "peft>=0.7.0",
+]
 compile = [
     "triton-windows>=3.6.0; sys_platform == 'win32'",
     "triton>=3.0.0; sys_platform == 'linux'",
