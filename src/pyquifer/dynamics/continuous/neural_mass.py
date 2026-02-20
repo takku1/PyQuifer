@@ -23,10 +23,10 @@ References:
   in localized populations of model neurons.
 """
 
+from typing import Dict, Literal, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, Tuple, Literal
 
 
 class WilsonCowanPopulation(nn.Module):

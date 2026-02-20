@@ -14,10 +14,10 @@ References:
 - Tsodyks, Pawelzik & Markram (1998). Neural networks with dynamic synapses.
 """
 
+from typing import Dict
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, Dict
 
 
 class TsodyksMarkramSynapse(nn.Module):

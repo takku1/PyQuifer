@@ -12,11 +12,11 @@ References:
 - multilayer-cudamoto: GPU Kuramoto implementations
 """
 
-import torch
-import torch.nn as nn
-import math
 import logging
-from typing import Dict, Any, Optional, Tuple
+import math
+from typing import Any, Dict, Optional, Tuple
+
+import torch
 
 logger = logging.getLogger(__name__)
 

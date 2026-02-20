@@ -15,12 +15,13 @@ References:
 - von der Malsburg (1981). The correlation theory of brain function.
 """
 
+from dataclasses import dataclass, field
+from typing import Dict, NamedTuple
+
 import torch
 import torch.nn as nn
-from dataclasses import dataclass, field
-from typing import Dict, Optional, NamedTuple
 
-from pyquifer.cognition.binding.sensory import MultimodalBinder, BindingStrength
+from pyquifer.cognition.binding.sensory import BindingStrength, MultimodalBinder
 
 
 class BusOutput(NamedTuple):

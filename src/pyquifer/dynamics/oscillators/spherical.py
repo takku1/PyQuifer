@@ -10,10 +10,11 @@ Extracted from akorn repository patterns. Key innovations:
 This is more geometrically correct than standard Kuramoto.
 """
 
+import math
+from typing import Literal, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Literal
-import math
 
 
 def reshape_to_groups(x: torch.Tensor, n: int) -> torch.Tensor:

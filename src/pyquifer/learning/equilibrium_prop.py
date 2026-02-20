@@ -20,10 +20,11 @@ References:
 - Ramaswamy & Bhatt (2024). EP for Coupled Oscillators.
 """
 
-import torch
-import torch.nn as nn
 import math
 from typing import Dict, Optional
+
+import torch
+import torch.nn as nn
 
 
 class EquilibriumPropagationTrainer:

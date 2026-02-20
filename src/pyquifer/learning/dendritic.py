@@ -17,9 +17,10 @@ References:
 - Richards & Bhatt (2018). The dendritic error hypothesis.
 """
 
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional
 
 
 class DendriticNeuron(nn.Module):

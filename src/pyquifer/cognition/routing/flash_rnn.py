@@ -16,11 +16,10 @@ References:
 - Koenig (2024). FlashRNN: Optimizing Traditional RNNs on Modern Hardware.
 """
 
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple
 
 # Try to import Triton for fused kernels
 _HAS_TRITON = False

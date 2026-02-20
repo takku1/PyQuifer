@@ -1,8 +1,9 @@
 """CognitiveCycle configuration."""
 import math
-import torch
-from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+import torch
 
 
 @dataclass

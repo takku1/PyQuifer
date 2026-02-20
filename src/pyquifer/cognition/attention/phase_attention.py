@@ -11,11 +11,11 @@ rather than softmax-weighted sums. This enables:
 Based on PhaseGPT patterns for Kuramoto-based attention replacement.
 """
 
+import math
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict
 
 
 class PhaseAttention(nn.Module):
@@ -504,6 +504,6 @@ if __name__ == '__main__':
     print("\n5. Gradient flow check")
     loss = output.sum()
     loss.backward()
-    print(f"   Gradients flow: OK")
+    print("   Gradients flow: OK")
 
     print("\n[OK] All phase attention tests passed!")

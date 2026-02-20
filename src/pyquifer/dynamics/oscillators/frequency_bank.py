@@ -1,16 +1,17 @@
+import logging
+from typing import Any, Dict, List, Optional
+
 import torch
 import torch.nn as nn
-from typing import List, Dict, Any, Optional
 
 from pyquifer.dynamics.oscillators.kuramoto import LearnableKuramotoBank
-import logging
 
 logger = logging.getLogger(__name__)
 
 class FrequencyBank(nn.Module):
     """
     Manages multiple LearnableKuramotoBank instances, each potentially operating
-    at a different characteristic frequency or with different configurations, 
+    at a different characteristic frequency or with different configurations,
     representing different "speeds of thought" or processing streams.
     This acts as the "Multi-Frequency Clock" for PyQuifer.
     """
@@ -20,8 +21,8 @@ class FrequencyBank(nn.Module):
         LearnableKuramotoBank.
 
         Args:
-            bank_configs (List[Dict[str, Any]]): A list of dictionaries, where each 
-                                                  dictionary contains parameters 
+            bank_configs (List[Dict[str, Any]]): A list of dictionaries, where each
+                                                  dictionary contains parameters
                                                   for initializing a LearnableKuramotoBank.
                                                   Example:
                                                   [
@@ -154,7 +155,7 @@ if __name__ == '__main__':
             freq_bank.banks[0].phases.copy_(torch.rand(freq_bank.banks[0].num_oscillators) * 2 * torch.pi)
         freq_bank.banks[0](steps=20)
         current_r = freq_bank.banks[0].get_order_parameter()
-        
+
         loss = (target_r_for_first_bank - current_r)**2
         loss.backward()
         optimizer.step()

@@ -5,10 +5,11 @@
 - PhaseTopologyCache: Rotation-invariant cache for phase topology patterns
   with Bayesian outcome priors.
 """
-import torch
-import torch.nn as nn
 import math
 from typing import Dict, List, Optional
+
+import torch
+import torch.nn as nn
 
 
 class KuramotoDaidoMeanField(nn.Module):

@@ -13,14 +13,13 @@ Based on:
 - Somatic marker hypothesis (Damasio)
 """
 
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
-import math
-import time
-import threading
-from typing import Dict, List, Optional, Any, Callable
-from dataclasses import dataclass, field
-from collections import deque
 
 
 @dataclass

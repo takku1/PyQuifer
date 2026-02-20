@@ -11,9 +11,10 @@ actively adjusting system parameters:
 - KoopmanBifurcationDetector: Bifurcation detection via DMD eigenvalues
 """
 
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Dict
 
 
 def phase_activity_to_spikes(phases: torch.Tensor,

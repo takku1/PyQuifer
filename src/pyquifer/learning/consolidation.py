@@ -19,10 +19,10 @@ References:
 - Nader et al. (2000). Memory Reconsolidation.
 """
 
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, List, Tuple
 
 
 class EpisodicBuffer(nn.Module):

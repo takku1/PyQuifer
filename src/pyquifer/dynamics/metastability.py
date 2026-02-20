@@ -19,10 +19,11 @@ References:
 - Tognoli & Kelso (2014). The Metastable Brain.
 """
 
+import math
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, List
 
 
 class WinnerlessCompetition(nn.Module):

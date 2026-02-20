@@ -22,10 +22,11 @@ References:
 - Clark (2013). Whatever Next? Predictive Brains, Situated Agents.
 """
 
+import math
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, List, Tuple
 
 
 class PredictiveLevel(nn.Module):

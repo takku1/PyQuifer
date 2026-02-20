@@ -11,10 +11,11 @@ Key concepts:
 This enables oscillatory systems to exhibit thermodynamic behavior.
 """
 
+import math
+from typing import Callable, Dict, List, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, Callable, Dict, List
-import math
 
 
 class TemperatureSchedule:

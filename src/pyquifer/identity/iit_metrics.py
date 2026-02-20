@@ -18,12 +18,13 @@ These metrics can be used to:
 Based on work by Tononi, Koch, Oizumi, Albantakis (pyphi implementation).
 """
 
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict, List
-from dataclasses import dataclass, field
 
 
 @dataclass

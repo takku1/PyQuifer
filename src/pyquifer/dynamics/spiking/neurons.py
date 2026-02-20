@@ -11,10 +11,11 @@ Key features:
 - Oscillatory SNN layers that can replace/complement Kuramoto banks
 """
 
+import math
+from typing import Literal, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, Literal
 
 
 class SurrogateSpike(torch.autograd.Function):

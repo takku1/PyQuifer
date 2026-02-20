@@ -8,11 +8,12 @@ recurrent connections, and reward-modulated learning.
 Based on patterns from snntorch and bindsnet.
 """
 
+import math
+from typing import Callable, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Callable
 
 
 class SynapticNeuron(nn.Module):

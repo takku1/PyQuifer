@@ -10,10 +10,11 @@ Key features:
 - Natural integration with PyQuifer's Kuramoto-based architecture
 """
 
+import math
+from typing import Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple
 
 
 class HarmonicOscillator(nn.Module):

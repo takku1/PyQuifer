@@ -16,6 +16,7 @@ __version__ = "0.1.0"
 # Library-level logging: attach NullHandler so users aren't forced into our config.
 # Users call logging.basicConfig() or configure handlers in their own code.
 import logging
+
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 # Define what can be imported - actual loading happens lazily

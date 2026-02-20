@@ -1,12 +1,12 @@
 """Public API: legacy compatibility layer and real-time bridge."""
-from pyquifer.api.legacy import PyQuifer
 from pyquifer.api.bridge import (
-    PyQuiferBridge,
     ModulationState,
+    PyQuiferBridge,
+    PyQuiferLogitsProcessor,
     SteppedModulator,
     sync_debug_mode,
-    PyQuiferLogitsProcessor,
 )
+from pyquifer.api.legacy import PyQuifer
 
 __all__ = [
     "PyQuifer",

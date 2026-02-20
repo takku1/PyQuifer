@@ -18,12 +18,13 @@ References:
 - Fries (2005). Communication Through Coherence (CTC).
 """
 
-import torch
-import torch.nn as nn
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Set
+
+import torch
+import torch.nn as nn
 
 
 @dataclass

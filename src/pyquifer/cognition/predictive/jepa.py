@@ -19,11 +19,11 @@ References:
 - Bardes et al. (2024). V-JEPA: Latent Video Prediction for Visual Representation.
 """
 
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple
 
 
 class JEPAEncoder(nn.Module):

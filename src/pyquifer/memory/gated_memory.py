@@ -15,11 +15,12 @@ References:
 - Baddeley (2003). Working memory and language: an overview.
 """
 
+import math
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple
 
 
 class NMDAGate(nn.Module):

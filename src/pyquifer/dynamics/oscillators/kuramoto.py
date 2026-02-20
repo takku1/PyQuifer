@@ -7,10 +7,11 @@ This module contains the core Kuramoto-family oscillator implementations:
   configurable topologies, precision-weighted coupling, and attractor analysis
 - SensoryCoupling: Biologically-motivated sensory-to-oscillator coupling
 """
+import math
+from typing import Dict, Literal, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Dict, List, Literal, Optional
 
 __all__ = [
     '_rk4_step', 'Snake', 'LearnableKuramotoBank', 'SensoryCoupling',

@@ -9,12 +9,13 @@ Contains multi-workspace and hierarchical workspace architectures:
 - WorkspaceEnsemble: N parallel workspaces with cross-bleed via standing broadcasts
 """
 
+from typing import Any, Dict, List, Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, List, Any
 
-from pyquifer.workspace.workspace import GlobalWorkspace
 from pyquifer.workspace.broadcast import StandingBroadcast
+from pyquifer.workspace.workspace import GlobalWorkspace
 
 
 class DiversityTracker:

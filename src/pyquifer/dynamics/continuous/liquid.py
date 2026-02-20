@@ -15,11 +15,12 @@ Based on:
 - Chen et al. "Neural Ordinary Differential Equations" (2018)
 """
 
+import math
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, List
 
 
 class LiquidTimeConstantCell(nn.Module):

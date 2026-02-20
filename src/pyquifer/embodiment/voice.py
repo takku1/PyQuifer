@@ -15,11 +15,12 @@ References:
 - Keitel et al. (2018): Speech rhythms and oscillatory tracking
 """
 
-import torch
-import torch.nn as nn
 import math
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
 
 from pyquifer.dynamics.neuromodulation import NeuromodulatorState
 

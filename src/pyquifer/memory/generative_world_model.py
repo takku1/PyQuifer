@@ -1,12 +1,13 @@
+from typing import Any, Dict, List, Tuple
+
 import torch
 import torch.nn as nn
-from typing import List, Dict, Any, Tuple
-from pyquifer.dynamics.oscillators.kuramoto import LearnableKuramotoBank # Still needed for FrequencyBank internal
+
 from pyquifer.dynamics.oscillators.frequency_bank import FrequencyBank
+from pyquifer.memory.diffusion import MindEyeActualization
 from pyquifer.memory.perturbation import PerturbationLayer
 from pyquifer.memory.potentials import MultiAttractorPotential
-from pyquifer.memory.diffusion import MindEyeActualization
-import math
+
 
 class GenerativeWorldModel(nn.Module):
     """
@@ -15,11 +16,11 @@ class GenerativeWorldModel(nn.Module):
 
     This model embodies the predictive processing feedback loop and leverages a Multi-Frequency Clock.
     """
-    def __init__(self, 
-                 space_dim: int, 
+    def __init__(self,
+                 space_dim: int,
                  bank_configs: List[Dict[str, Any]], # Configuration for FrequencyBank
-                 num_attractors: int, 
-                 noise_params: dict = None, 
+                 num_attractors: int,
+                 noise_params: dict = None,
                  actualization_strength: float = 0.1):
         super().__init__()
         self.space_dim = space_dim
@@ -29,10 +30,10 @@ class GenerativeWorldModel(nn.Module):
         # Core Components
         self.perturbation_layer = PerturbationLayer(dim=space_dim, **(noise_params if noise_params else {}))
         self.potential_field = MultiAttractorPotential(num_attractors=num_attractors, dim=space_dim)
-        
+
         # Replace single Kuramoto bank with a FrequencyBank
         self.frequency_bank = FrequencyBank(bank_configs=bank_configs)
-        
+
         # Calculate total number of oscillators from all banks
         total_oscillators = sum(config.get("num_oscillators", 0) for config in bank_configs)
 
@@ -63,12 +64,12 @@ class GenerativeWorldModel(nn.Module):
         self.feedback_gain = nn.Parameter(torch.tensor(0.01))
 
 
-    def forward(self, 
-                input_noise_shape: tuple, 
-                initial_specimen_state: torch.Tensor, 
-                actualization_iterations: int, 
-                oscillator_steps: int = 100, 
-                noise_amplitude: float = 1.0, 
+    def forward(self,
+                input_noise_shape: tuple,
+                initial_specimen_state: torch.Tensor,
+                actualization_iterations: int,
+                oscillator_steps: int = 100,
+                noise_amplitude: float = 1.0,
                 time_offset: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, torch.Tensor]:
         """
         Runs one cycle of the generative world model, demonstrating the feedback loop.
@@ -87,7 +88,7 @@ class GenerativeWorldModel(nn.Module):
         # --- Bottom-Up: Noise and Harmonics Coming In ---
         # 1. Generate Noise (The Canvas/Perturbation)
         generated_noise = self.perturbation_layer(input_noise_shape, time_offset=time_offset)
-        
+
         # For demonstration, let's take a simplified "summary" of the noise
         # This can be more sophisticated (e.g., Fourier transform, feature extraction)
         # noise_summary = generated_noise.mean(dim=tuple(range(1, len(generated_noise.shape)))) # Mean over spatial dims
@@ -151,13 +152,13 @@ if __name__ == '__main__':
         "lacunarity": 2.0
     }
     actualization_strength = 0.05
-    
+
     # Configuration for FrequencyBank - define fast and slow heartbeats
     bank_configs = [
         {"num_oscillators": 50, "dt": 0.005, "initial_frequency_range": (1.0, 2.0)}, # Fast heartbeat
         {"num_oscillators": 20, "dt": 0.05, "initial_frequency_range": (0.1, 0.5)}, # Slow heartbeat
     ]
-    
+
     # Calculate total oscillators for context
     total_oscillators_in_banks = sum(config["num_oscillators"] for config in bank_configs)
 
@@ -170,7 +171,7 @@ if __name__ == '__main__':
         noise_params=noise_params,
         actualization_strength=actualization_strength
     )
-    
+
     # Move model to GPU if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     world_model.to(device)
@@ -208,16 +209,16 @@ if __name__ == '__main__':
     # Demonstrate a training step
     print("\n--- Demonstrating a Training Step ---")
     optimizer = torch.optim.Adam(world_model.parameters(), lr=0.005)
-    
+
     # Define a goal: Make the actualized state close to [0.2, 0.4, 0.6]
     target_goal_state = torch.tensor([[0.2, 0.4, 0.6]]).to(device)
 
     for epoch in range(5):
-        optimizer.zero_grad() 
-        
+        optimizer.zero_grad()
+
         # Generate some random initial state for this epoch
         current_initial_state = torch.rand(1, space_dim).to(device)
-        
+
         # Run the model
         actualized_output, _, _, _, _ = world_model(
             input_noise_shape,
@@ -227,13 +228,13 @@ if __name__ == '__main__':
             noise_amplitude=0.1,
             time_offset=epoch * 0.1
         )
-        
+
         # Loss: how far is the actualized output from our target goal
         loss = torch.mean((actualized_output - target_goal_state)**2)
-        
+
         loss.backward()
         optimizer.step()
-        
+
         print(f"Epoch {epoch+1}, Loss: {loss.item():.6f}, "
               f"Actualized State: {actualized_output.squeeze().detach().cpu().numpy()}, "
               f"Archetype: {world_model.archetype_vector.squeeze().detach().cpu().numpy()}")

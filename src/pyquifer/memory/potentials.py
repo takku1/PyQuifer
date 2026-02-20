@@ -1,6 +1,8 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional
+
 
 class MultiAttractorPotential(nn.Module):
     """
@@ -9,8 +11,8 @@ class MultiAttractorPotential(nn.Module):
     The potential at any given point in the space is a function of its distance
     to the various attractors. This creates a landscape that a "specimen" can navigate.
     """
-    def __init__(self, num_attractors: int, dim: int, 
-                 initial_strength_range=(0.5, 1.5), 
+    def __init__(self, num_attractors: int, dim: int,
+                 initial_strength_range=(0.5, 1.5),
                  attractor_positions: Optional[torch.Tensor] = None): # New parameter
         """
         Initializes the potential field.
@@ -78,7 +80,7 @@ class MultiAttractorPotential(nn.Module):
         # We use a negative sign so that lower potential is better (closer to attractor).
         # Shape: (num_attractors,) -> (1, num_attractors)
         strengths = self.attractor_strengths.unsqueeze(0)
-        
+
         # Shape: (num_positions, num_attractors)
         potential_per_attractor = -strengths / dist_sq
 
@@ -102,7 +104,7 @@ class MultiAttractorPotential(nn.Module):
         """
         if not positions.requires_grad:
             positions.requires_grad_(True)
-        
+
         # Calculate potential
         potential = self.forward(positions)
 
@@ -141,7 +143,7 @@ if __name__ == '__main__':
     potential_values = potential_field(test_positions)
     print(f"\nCalculated potential for {test_positions.shape[0]} points.")
     print("Potential values shape:", potential_values.shape)
-    
+
     # Calculate force at a specific point
     single_position = torch.tensor([[0.5, 0.5]], requires_grad=True)
     force_vector = potential_field.get_force(single_position)
@@ -150,21 +152,21 @@ if __name__ == '__main__':
     # Demonstrate optimization
     print("\n--- Optimizing Attractor Positions ---")
     optimizer = torch.optim.Adam(potential_field.parameters(), lr=0.1)
-    
+
     # Let's say we want to move the attractors to attract a point at [0,0]
     target_position = torch.tensor([[0.0, 0.0]])
-    
+
     for epoch in range(5):
         optimizer.zero_grad()
-        
+
         # The goal is to maximize the potential's pull at the target position.
         # We can do this by minimizing the potential value at that point (making it more negative).
         loss = potential_field(target_position)
-        
+
         loss.backward()
         optimizer.step()
 
         print(f"Epoch {epoch+1:2d}, Loss (Potential at [0,0]): {loss.item():.4f}")
-    
+
     print("\nOptimization finished. Attractor positions should have moved closer to [0,0].")
     print("Final Attractor Positions:\n", potential_field.attractor_positions.data)

@@ -1,7 +1,7 @@
 """Tensor-only tick result type."""
-import torch
 from typing import NamedTuple
 
+import torch
 
 # Processing mode constants (tensor-friendly, no strings in hot path)
 PROCESSING_MODE_PERCEPTION = 0

@@ -20,10 +20,11 @@ References:
 - Moss et al. (2004). Stochastic Resonance and Sensory Information Processing.
 """
 
+import math
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict
 
 
 class OrnsteinUhlenbeckNoise(nn.Module):

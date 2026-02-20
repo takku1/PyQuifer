@@ -1,25 +1,25 @@
 """Learning rules: synaptic plasticity, continual learning, consolidation, and dendritic credit."""
-from pyquifer.learning.synaptic import (
-    EligibilityTrace,
-    RewardModulatedHebbian,
-    ContrastiveHebbian,
-    PredictiveCoding,
-    DifferentiablePlasticity,
-    ThreeFactorRule,
-    OscillationGatedPlasticity,
-)
-from pyquifer.learning.continual import (
-    ElasticWeightConsolidation,
-    ContinualLearner,
-)
 from pyquifer.learning.consolidation import (
-    EpisodicBuffer,
     ConsolidationEngine,
+    EpisodicBuffer,
     SleepReplayConsolidation,
 )
-from pyquifer.learning.equilibrium_prop import EPKuramotoClassifier
-from pyquifer.learning.stp import TsodyksMarkramSynapse, STPLayer
+from pyquifer.learning.continual import (
+    ContinualLearner,
+    ElasticWeightConsolidation,
+)
 from pyquifer.learning.dendritic import DendriticNeuron, DendriticStack
+from pyquifer.learning.equilibrium_prop import EPKuramotoClassifier
+from pyquifer.learning.stp import STPLayer, TsodyksMarkramSynapse
+from pyquifer.learning.synaptic import (
+    ContrastiveHebbian,
+    DifferentiablePlasticity,
+    EligibilityTrace,
+    OscillationGatedPlasticity,
+    PredictiveCoding,
+    RewardModulatedHebbian,
+    ThreeFactorRule,
+)
 
 __all__ = [
     "EligibilityTrace",

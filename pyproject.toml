@@ -67,3 +67,29 @@ include = ["pyquifer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N"]
+ignore = [
+    # Scientific/ML naming conventions: uppercase matrix/tensor variables are standard
+    "N803",   # argument name should be lowercase (K, N, A, B, R, Psi, tau_E etc.)
+    "N802",   # function name should be lowercase (Z, R, Psi — property-style accessors)
+    "N806",   # non-lowercase variable in function (X, H, A, B — tensor/matrix notation)
+    "N812",   # lowercase imported as non-lowercase (import nn.functional as F is idiomatic)
+    "N815",   # mixed-case variable in class scope (mathematical notation)
+    "E741",   # ambiguous variable names (l=loss, I=identity are standard in ML)
+    # Unused variables: tensor shape unpacking (B, T, D = x.shape) is idiomatic
+    "F841",
+    # Line-too-long: scientific formulas and comments legitimately exceed 100 chars
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py files re-export symbols — F401 is expected
+"__init__.py" = ["F401"]
+# Availability checks inside try/except blocks look unused to ruff
+"flash_rnn.py" = ["F401"]

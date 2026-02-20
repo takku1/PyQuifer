@@ -19,11 +19,12 @@ References:
 - Damasio (2003). Looking for Spinoza: Joy, sorrow, and the feeling brain.
 """
 
+import math
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Dict, List, Tuple, Any, Union
 
 
 class MirrorResonance(nn.Module):

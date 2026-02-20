@@ -16,12 +16,13 @@ Based on:
 - Dynamical systems theory of self (Kelso)
 """
 
+import math
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
-from collections import deque
 
 
 @dataclass

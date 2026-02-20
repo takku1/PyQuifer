@@ -16,11 +16,11 @@ References:
 - Payeur et al. (2021). Burst-dependent synaptic plasticity.
 """
 
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple, List
 
 
 class DendriticErrorSignal(nn.Module):

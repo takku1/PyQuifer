@@ -18,11 +18,12 @@ This enables:
 Based on work by Plate (2003), Kanerva (2009), and recent VSA literature.
 """
 
+import math
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict, List
 
 
 def circular_convolution(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

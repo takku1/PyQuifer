@@ -16,11 +16,11 @@ References:
 - Fedus et al. (2022). Switch Transformers: Scaling to Trillion Parameter Models.
 """
 
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple, List
 
 
 class ExpertPool(nn.Module):

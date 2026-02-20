@@ -20,12 +20,12 @@ No if/else - behavior emerges from tensor flow.
 Based on: Hafner et al. (2019-2024), DreamerV1/V2/V3
 """
 
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict, List, Callable
-from dataclasses import dataclass
 
 
 @dataclass
@@ -795,7 +795,8 @@ if __name__ == '__main__':
 
     # Example 2: Imagination Trajectory
     print("\n2. Imagination Trajectory")
-    policy = lambda z: torch.randn(z.shape[0], 4)  # Random policy
+    def policy(z):
+        return torch.randn(z.shape[0], 4)  # Random policy
 
     trajectory = rssm.imagine_trajectory(state, policy, horizon=10)
     print(f"   Trajectory length: {len(trajectory)}")

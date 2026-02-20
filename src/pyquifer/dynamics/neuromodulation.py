@@ -21,12 +21,13 @@ This enables dynamic, context-dependent computation where the
 architecture effectively "rewires" based on internal state.
 """
 
+import math
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict, List
-from dataclasses import dataclass
 
 
 @dataclass

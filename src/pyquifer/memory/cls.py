@@ -19,12 +19,13 @@ References:
 - O'Reilly & Norman (2002). Hippocampal and neocortical contributions to memory.
 """
 
-import torch
-import torch.nn as nn
 import math
 import time
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import torch
+import torch.nn as nn
 
 
 @dataclass

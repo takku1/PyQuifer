@@ -19,12 +19,11 @@ Phase 11.2 of the PyQuifer enhancement plan.
 """
 
 import math
-from typing import Dict, Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 # ---------------------------------------------------------------------------
 # Utility conversions

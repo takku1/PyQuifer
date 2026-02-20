@@ -19,10 +19,11 @@ References:
 - Barnett et al. (2009). Granger Causality and Transfer Entropy.
 """
 
+import math
+from typing import Dict
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, List, Tuple
 
 
 class TransferEntropyEstimator(nn.Module):
@@ -506,7 +507,7 @@ if __name__ == '__main__':
 
     flow_result = cfm.compute_flow()
     print(f"   Driver scores: {flow_result['driver_scores'].detach().cpu().numpy().round(3)}")
-    print(f"   (Population 0 should be strongest driver)")
+    print("   (Population 0 should be strongest driver)")
 
     # Example 3: Dominance Detection
     print("\n3. Dominance Detection (3 levels)")

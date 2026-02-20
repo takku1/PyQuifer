@@ -8,17 +8,18 @@ and global broadcasting into a unified consciousness bottleneck.
 Based on: Baars (1988), Dehaene et al. (2014), Mashour et al. (2020)
 """
 
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, List
 
-from pyquifer.workspace.competition import (
-    SalienceComputer,
-    IgnitionDynamics,
-    CompetitionDynamics,
-    PrecisionWeighting,
-)
 from pyquifer.workspace.broadcast import GlobalBroadcast
+from pyquifer.workspace.competition import (
+    CompetitionDynamics,
+    IgnitionDynamics,
+    PrecisionWeighting,
+    SalienceComputer,
+)
 
 
 class GlobalWorkspace(nn.Module):

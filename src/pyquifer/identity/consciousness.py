@@ -15,10 +15,11 @@ These metrics enable PyQuifer to:
 Based on work by Tononi, Massimini, Koch, and Sporns.
 """
 
+import math
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, Dict, List
 
 
 class PerturbationalComplexity(nn.Module):

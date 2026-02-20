@@ -12,13 +12,14 @@ gains access to the global workspace:
 - PrecisionWeighting: Bayesian precision estimation and error weighting
 """
 
+import math
+from dataclasses import dataclass
+from enum import Enum
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Tuple
-from dataclasses import dataclass
-from enum import Enum
 
 
 class ContentType(Enum):

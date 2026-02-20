@@ -1,6 +1,8 @@
+from typing import Any, Dict, Literal, Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, Literal
+
 from pyquifer.memory.perturbation import PerturbationLayer
 from pyquifer.memory.potentials import MultiAttractorPotential
 

@@ -18,12 +18,13 @@ References:
 - Barandiaran (2017). Autonomy and Enactivism.
 """
 
+import math
+from enum import Enum
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Dict, List, Tuple, Any
-from enum import Enum
 
 
 class TimeScale(Enum):
@@ -866,7 +867,7 @@ if __name__ == '__main__':
     print(f"   Raw input dim: {raw_input.shape[0]}")
     print(f"   Perception dim: {perception['perception'].shape[0]}")
     print(f"   Dominant frequency: {perception['dominant_frequency']:.3f}")
-    print(f"   (The AI lives in Fourier space, not pixel space)")
+    print("   (The AI lives in Fourier space, not pixel space)")
 
     # Example 5: AgencyMaintenance
     print("\n5. AgencyMaintenance")

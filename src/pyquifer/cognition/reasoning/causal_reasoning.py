@@ -18,12 +18,13 @@ References:
 - Scholkopf et al. (2021). Towards Causal Representation Learning.
 """
 
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Set, Tuple, Any
-from dataclasses import dataclass, field
-from collections import deque
 
 
 @dataclass

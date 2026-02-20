@@ -19,10 +19,10 @@ References:
 - Parr & Friston (2017). Working Memory, Attention, and Salience.
 """
 
+from typing import Dict
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict
 
 
 class PrecisionEstimator(nn.Module):

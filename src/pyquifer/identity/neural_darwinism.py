@@ -19,11 +19,12 @@ References:
 - Margulis (1967). On the Origin of Mitosing Cells. (Symbiogenesis)
 """
 
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from dataclasses import dataclass, field
-from typing import Optional, Dict, List, Tuple
 
 
 @dataclass
@@ -820,6 +821,6 @@ if __name__ == '__main__':
     resources = result['resources']
     print(f"   Final resources: {resources.detach().cpu().numpy().round(3)}")
     print(f"   Resource ratio (max/min): {resources.max().item() / resources.min().item():.2f}")
-    print(f"   (Higher ratio = more specialization)")
+    print("   (Higher ratio = more specialization)")
 
     print("\n[OK] All neural darwinism tests passed!")

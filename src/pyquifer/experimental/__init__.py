@@ -1,12 +1,12 @@
 """Experimental modules: quantum, hyperdimensional, hyperbolic, reservoir computing, FHRR."""
-from pyquifer.experimental.quantum import QuantumDecisionMaker
-from pyquifer.experimental.hyperdimensional import HypervectorMemory, HDCReasoner
-from pyquifer.experimental.hyperbolic import (
-    HyperbolicOperations,
-    EmotionalGravityManifold,
-)
-from pyquifer.experimental.reservoir import EchoStateNetwork, CriticalReservoir
 from pyquifer.experimental.fhrr import FHRREncoder
+from pyquifer.experimental.hyperbolic import (
+    EmotionalGravityManifold,
+    HyperbolicOperations,
+)
+from pyquifer.experimental.hyperdimensional import HDCReasoner, HypervectorMemory
+from pyquifer.experimental.quantum import QuantumDecisionMaker
+from pyquifer.experimental.reservoir import CriticalReservoir, EchoStateNetwork
 
 __all__ = [
     "QuantumDecisionMaker",

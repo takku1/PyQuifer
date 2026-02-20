@@ -25,10 +25,10 @@ References:
 - Weber et al. (2023). The generalized Hierarchical Gaussian Filter.
 """
 
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Dict, List
 
 
 class VolatilityNode(nn.Module):

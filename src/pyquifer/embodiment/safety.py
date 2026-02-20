@@ -24,11 +24,12 @@ References:
 - Swain, J.E. et al. (2007). Brain basis of early parent-infant interactions.
 """
 
+import math
+from typing import Any, Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Dict, Tuple, Any
 
 
 class SafetyEnvelope(nn.Module):
@@ -555,7 +556,7 @@ if __name__ == '__main__':
 
     print(f"   Uncertainty: {result['uncertainty'].item():.3f}")
     print(f"   Coherence: {result['coherence'].item():.3f}")
-    print(f"   Kindchenschema signals:")
+    print("   Kindchenschema signals:")
     for k, v in result['kindchenschema'].items():
         print(f"     {k}: {v:.3f}")
     print(f"   Human override needed: {result['human_override_request']}")

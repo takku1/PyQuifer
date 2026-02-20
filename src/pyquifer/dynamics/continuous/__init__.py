@@ -1,22 +1,22 @@
 """Continuous-time dynamical systems: LinOSS, liquid networks, neural mass, ODE solvers."""
 from pyquifer.dynamics.continuous.linoss import (
     HarmonicOscillator,
-    LinOSSLayer,
     LinOSSEncoder,
+    LinOSSLayer,
 )
 from pyquifer.dynamics.continuous.liquid import (
+    ContinuousTimeRNN,
     LiquidTimeConstantCell,
     NeuralODE,
-    ContinuousTimeRNN,
 )
 from pyquifer.dynamics.continuous.neural_mass import (
-    WilsonCowanPopulation,
     WilsonCowanNetwork,
+    WilsonCowanPopulation,
 )
 from pyquifer.dynamics.continuous.ode_solvers import (
+    DopriSolver,
     EulerSolver,
     RK4Solver,
-    DopriSolver,
     solve_ivp,
 )
 

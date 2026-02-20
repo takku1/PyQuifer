@@ -56,12 +56,13 @@ References:
 - Edelman (1987): Neural Darwinism
 """
 
-import torch
-import torch.nn as nn
 import time
 from contextlib import contextmanager
-from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+import torch
+import torch.nn as nn
 
 
 @contextmanager
@@ -178,8 +179,8 @@ class PyQuiferBridge(nn.Module):
                     Use PyQuiferBridge.default() or .small() for presets.
         """
         super().__init__()
-        from pyquifer.runtime.cycle import CognitiveCycle
         from pyquifer.runtime.config import CycleConfig
+        from pyquifer.runtime.cycle import CognitiveCycle
         self.config = config or CycleConfig.default()
         self.cycle = CognitiveCycle(self.config)
 
@@ -1017,7 +1018,7 @@ if __name__ == '__main__':
     print(f"  Relative perturbation: {diff / fake_hidden.norm().item():.6f}")
 
     # --- Latency ---
-    print(f"\n--- Latency ---")
+    print("\n--- Latency ---")
     stats = bridge.get_latency_stats()
     print(f"  Mean latency: {stats['mean_latency_ms']:.2f}ms")
     print(f"  Steps: {stats['num_steps']}")

@@ -16,10 +16,10 @@ This is NOT reward hacking. It's intrinsic motivation - wanting to learn
 because learning feels good, not because someone gives you points.
 """
 
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, Dict, List, Literal
 
 
 class NoveltyDetector(nn.Module):

@@ -19,10 +19,11 @@ References:
   in top-down processing. Nature Reviews Neuroscience.
 """
 
-import torch
-import torch.nn as nn
 import math
 from typing import Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
 
 
 class ModalityEncoder(nn.Module):

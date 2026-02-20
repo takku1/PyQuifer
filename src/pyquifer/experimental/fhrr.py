@@ -20,10 +20,12 @@ References:
 - Kleyko et al. (2023). A Survey on Hyperdimensional Computing. ACM Survey.
 """
 
+import math
+from typing import Dict, List, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Dict, Optional, Tuple, List
+import torch.nn.functional as F
 
 
 class FHRREncoder(nn.Module):

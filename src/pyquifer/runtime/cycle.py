@@ -1,19 +1,21 @@
 """CognitiveCycle - the main cognitive loop."""
 
+import logging
+import math
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-import logging
-from typing import Optional, Dict, Any, List
 
-from pyquifer.runtime.tick_result import (
-    TickResult, PROCESSING_MODE_PERCEPTION, PROCESSING_MODE_IMAGINATION,
-    PROCESSING_MODE_BALANCED, PROCESSING_MODE_NAMES, _PROCESSING_MODE_FROM_STR,
-)
+import pyquifer.runtime.criticality_feedback as _cf_mod
 from pyquifer.runtime.config import CycleConfig
 from pyquifer.runtime.criticality_feedback import _criticality_feedback
-import pyquifer.runtime.criticality_feedback as _cf_mod
+from pyquifer.runtime.tick_result import (
+    _PROCESSING_MODE_FROM_STR,
+    PROCESSING_MODE_BALANCED,
+    TickResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +231,9 @@ class CognitiveCycle(nn.Module):
         )
 
         from pyquifer.learning.consolidation import (
-            EpisodicBuffer, SharpWaveRipple, ConsolidationEngine
+            ConsolidationEngine,
+            EpisodicBuffer,
+            SharpWaveRipple,
         )
         self.episodic_buffer = EpisodicBuffer(
             state_dim=c.state_dim,
@@ -247,7 +251,7 @@ class CognitiveCycle(nn.Module):
         self.motivation = IntrinsicMotivationSystem(state_dim=c.state_dim)
 
         # === Layer 7: Self-Model ===
-        from pyquifer.identity.self_model import MarkovBlanket, SelfModel, NarrativeIdentity
+        from pyquifer.identity.self_model import MarkovBlanket, NarrativeIdentity, SelfModel
         self.markov_blanket = MarkovBlanket(
             internal_dim=c.internal_dim,
             sensory_dim=c.sensory_dim,
@@ -397,9 +401,9 @@ class CognitiveCycle(nn.Module):
         self._diversity_tracker = None
 
         if c.use_global_workspace:
-            from pyquifer.workspace.workspace import GlobalWorkspace
             from pyquifer.workspace.ensemble import DiversityTracker
             from pyquifer.workspace.organ_base import OscillatoryWriteGate
+            from pyquifer.workspace.workspace import GlobalWorkspace
             self._gw = GlobalWorkspace(
                 content_dim=c.workspace_dim,
                 workspace_dim=c.workspace_dim,
@@ -522,7 +526,7 @@ class CognitiveCycle(nn.Module):
         # Phase-Lock Bus (multimodal coordinator)
         self._phase_lock_bus = None
         if c.use_phase_lock_bus:
-            from pyquifer.dynamics.phase_lock_bus import PhaseLockBus, BusConfig
+            from pyquifer.dynamics.phase_lock_bus import BusConfig, PhaseLockBus
             _mod_dims = c.phase_lock_modality_dims or {"text": c.state_dim}
             self._phase_lock_bus = PhaseLockBus(BusConfig(
                 modality_dims=_mod_dims,
@@ -1967,8 +1971,11 @@ class CognitiveCycle(nn.Module):
         _neuro_metrics = {}
         if self._R_long_ptr >= self.config.diagnostics_buffer_len and _tick_val % 100 == 0:
             from pyquifer.diagnostics.neuroscience import (
-                spectral_exponent, dfa_exponent, lempel_ziv_complexity,
-                avalanche_statistics, complexity_entropy,
+                avalanche_statistics,
+                complexity_entropy,
+                dfa_exponent,
+                lempel_ziv_complexity,
+                spectral_exponent,
             )
             R_series = self._R_long_history.clone()
             # Use oscillator activity signal for avalanche detection (LFP analog)

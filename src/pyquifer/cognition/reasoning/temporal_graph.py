@@ -17,11 +17,11 @@ References:
 - Jin et al. (2020). Recurrent Event Network for Reasoning over Temporal KGs.
 """
 
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Any, Tuple, Set
-from dataclasses import dataclass, field
-import math
 
 
 @dataclass

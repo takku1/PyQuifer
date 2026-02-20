@@ -1,13 +1,13 @@
 """Cognitive control: motivation, metacognition, deliberation, volatility estimation."""
-from pyquifer.cognition.control.motivation import (
-    IntrinsicMotivationSystem,
-    EpistemicValue,
-)
+from pyquifer.cognition.control.deliberation import BeamSearchReasoner, Deliberator
 from pyquifer.cognition.control.metacognitive import (
-    MetacognitiveLoop,
     EvidenceAggregator,
+    MetacognitiveLoop,
 )
-from pyquifer.cognition.control.deliberation import Deliberator, BeamSearchReasoner
+from pyquifer.cognition.control.motivation import (
+    EpistemicValue,
+    IntrinsicMotivationSystem,
+)
 from pyquifer.cognition.control.volatility import HierarchicalVolatilityFilter
 
 __all__ = [

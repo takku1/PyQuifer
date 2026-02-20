@@ -25,12 +25,12 @@ References:
 - Kidger (2022). On Neural Differential Equations. PhD thesis.
 """
 
+import math
+from dataclasses import dataclass
+from typing import Callable, List, Literal, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from dataclasses import dataclass, field
-from typing import Callable, List, Literal, Optional, Tuple, Union
-
 
 # ---------------------------------------------------------------------------
 # Type alias for the RHS function: f(t, y) -> dy/dt

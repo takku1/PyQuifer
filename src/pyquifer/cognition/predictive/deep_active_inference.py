@@ -23,15 +23,15 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, Categorical
+from torch.distributions import Categorical, Normal
 
 from pyquifer.cognition.predictive.active_inference import (
-    PredictiveEncoder,
-    PredictiveDecoder,
     ExpectedFreeEnergy,
-    reparameterize,
-    kl_divergence_gaussian,
+    PredictiveDecoder,
+    PredictiveEncoder,
     constrained_activation,
+    kl_divergence_gaussian,
+    reparameterize,
 )
 
 

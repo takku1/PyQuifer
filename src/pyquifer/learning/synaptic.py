@@ -14,10 +14,11 @@ the intrinsic motivation system.
 Based on work by Hebb, Gerstner, Sutton, Friston.
 """
 
+import math
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, Dict, Callable, List
 
 
 class EligibilityTrace(nn.Module):

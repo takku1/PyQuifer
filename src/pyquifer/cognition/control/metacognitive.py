@@ -17,14 +17,15 @@ Based on:
 - Epistemic emotions (curiosity, confusion, aha moments)
 """
 
-import torch
-import torch.nn as nn
 import math
 import time
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Dict, List
+
+import torch
+import torch.nn as nn
 
 
 class ConfidenceLevel(Enum):

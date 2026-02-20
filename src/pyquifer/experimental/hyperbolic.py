@@ -18,12 +18,12 @@ Based on:
 - Non-Euclidean Space Generative Models (NESGM)
 """
 
+import math
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, List, Optional, Any, Tuple
-
 
 # =============================================================================
 # HYPERBOLIC OPERATIONS (Poincaré Ball Model)

@@ -35,12 +35,12 @@ References:
   Internal Report 81-2, MPI for Biophysical Chemistry.
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
 from typing import Dict, Optional, Tuple
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 # ============================================================
 # Hypersphere utilities (following Rusch et al. 2025)

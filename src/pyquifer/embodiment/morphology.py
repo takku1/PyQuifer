@@ -17,11 +17,12 @@ This module is hardware-agnostic (pure PyTorch). For persistent GPU daemons
 and hardware-specific implementations, see your deployment project.
 """
 
+import math
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Dict, Tuple, List, Any, Callable
 
 
 class TensionField(nn.Module):

@@ -14,10 +14,11 @@ Key concepts:
 Based on research by Pascal Fries, Gyorgy Buzsaki, Wolf Singer.
 """
 
+import math
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Optional, Tuple, List, Literal
 
 
 class PhaseGate(nn.Module):

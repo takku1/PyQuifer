@@ -17,11 +17,11 @@ References:
 - Lazarus (1991). Emotion and adaptation.
 """
 
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-import math
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
 
 
 @dataclass

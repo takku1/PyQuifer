@@ -4,10 +4,11 @@ Unlike Kuramoto (phase-only), Stuart-Landau tracks both amplitude and phase
 via complex state z. The bifurcation parameter mu controls the distance from
 the Hopf bifurcation point, making it a natural fit for criticality control.
 """
-import torch
-import torch.nn as nn
 import math
 from typing import Dict, Literal, Optional
+
+import torch
+import torch.nn as nn
 
 from pyquifer.dynamics.oscillators.kuramoto import _rk4_step
 

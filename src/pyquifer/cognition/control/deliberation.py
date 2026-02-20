@@ -18,11 +18,11 @@ References:
 - Wang et al. (2023). Self-Consistency Improves Chain of Thought Reasoning.
 """
 
+from dataclasses import dataclass
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
 
 
 class ProcessRewardModel(nn.Module):

@@ -24,12 +24,12 @@ All operations use einsum for substrate-optimal GPU execution.
 Based on: Busemeyer & Bruza (2012), Pothos & Busemeyer (2013)
 """
 
+import math
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Tuple, Dict, List, Union
-from dataclasses import dataclass
 
 
 def complex_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -740,7 +740,7 @@ if __name__ == '__main__':
     probs_ab, probs_ba = qd.order_effect(state.state, q_a, q_b)
     diff = (probs_ab - probs_ba).abs().mean()
     print(f"   Order effect magnitude: {diff.item():.4f}")
-    print(f"   (Non-zero indicates quantum-like order effects)")
+    print("   (Non-zero indicates quantum-like order effects)")
 
     # Example 6: Quantum Memory
     print("\n6. Quantum Memory")

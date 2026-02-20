@@ -12,12 +12,13 @@ Key concepts:
 Based on Ha et al. "HyperNetworks" (2016) and patterns from torchhyper/hyper-nn.
 """
 
+import math
+from enum import Enum
+from typing import Dict, List, Literal, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from enum import Enum
-from typing import Optional, Dict, List, Literal, Tuple, Union
 
 
 class InputEncoding(Enum):
@@ -447,7 +448,7 @@ if __name__ == '__main__':
 
     context = torch.randn(16)
     params = hypernet(context)
-    print(f"   Generated params:")
+    print("   Generated params:")
     for name, tensor in params.items():
         print(f"     {name}: {tensor.shape}")
 

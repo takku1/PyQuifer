@@ -8,10 +8,11 @@ content to all subscribed modules:
 - StandingBroadcast: EMA buffer persisting recent broadcast content
 """
 
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List
 
 
 class GlobalBroadcast(nn.Module):

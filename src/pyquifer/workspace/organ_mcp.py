@@ -21,10 +21,11 @@ References:
 """
 
 import time
-import torch
-import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import Optional, Set
+
+import torch
+import torch.nn as nn
 
 from pyquifer.workspace.organ_base import Organ, Proposal
 

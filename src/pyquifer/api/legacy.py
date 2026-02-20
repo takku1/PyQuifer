@@ -1,11 +1,11 @@
+import logging
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Optional, Union, Dict, Any, List, Callable, Literal
 
 from pyquifer.memory.generative_world_model import GenerativeWorldModel
-from pyquifer.dynamics.oscillators.frequency_bank import FrequencyBank
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class PyQuifer(nn.Module):
         ).to(self.device)
 
         logger.info(f"PyQuifer initialized on device: {self.device}")
-        
+
         # Internal state for data handling (Automated Sieve)
         self._data_schema: Optional[Dict[str, Any]] = None
         self._feature_scalers: Dict[str, Any] = {}
@@ -95,8 +95,8 @@ class PyQuifer(nn.Module):
         """
         try:
             import pandas as pd
-            from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
             from sklearn.decomposition import PCA
+            from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
         except ImportError as e:
             raise ImportError(
                 "pandas and scikit-learn are required for data preprocessing. "
@@ -116,7 +116,7 @@ class PyQuifer(nn.Module):
             raise TypeError("Unsupported data type for preprocessing. Please provide pandas DataFrame, numpy array, or list of dicts.")
 
         processed_features = []
-        
+
         for col in df.columns:
             feature_data = df[col].values.reshape(-1, 1)
 
@@ -204,7 +204,7 @@ class PyQuifer(nn.Module):
 
         # Calculate variance of the processed data (across all features for simplicity)
         data_variance = torch.var(processed_data).item()
-        
+
         # Heuristic: actualization_strength = C / (data_variance + epsilon)
         # Higher variance means more spread-out data, suggesting we might need a lower
         # actualization strength (more 'friction') to prevent overshooting.
@@ -215,7 +215,7 @@ class PyQuifer(nn.Module):
         # Clamp the actualization_strength to a reasonable range to prevent extreme values
         min_strength, max_strength = 0.01, 0.5
         new_actualization_strength = max(min_strength, min(max_strength, new_actualization_strength))
-        
+
         self.model.mind_eye_actualization.actualization_strength = new_actualization_strength
         self.model.actualization_strength = new_actualization_strength  # Keep in sync
         logger.info(f"Viscosity Control: Adjusted actualization_strength to {new_actualization_strength:.4f} "
@@ -235,11 +235,11 @@ class PyQuifer(nn.Module):
         """
         logger.info("Ingesting data...")
         # Store raw data (optional, for debugging or later re-processing)
-        self._raw_data_storage = data 
-        
+        self._raw_data_storage = data
+
         # Use the Automated Sieve to preprocess the data
         processed_np = self._preprocess_data(data, is_training_data=True)
-        
+
         self._processed_data_storage = torch.from_numpy(processed_np).float().to(self.device)
         logger.info(f"Data ingested and processed. Shape: {self._processed_data_storage.shape}")
 
@@ -248,7 +248,7 @@ class PyQuifer(nn.Module):
             self._calculate_viscosity_params(self._processed_data_storage)
 
 
-    def actualize_vision(self, 
+    def actualize_vision(self,
                          input_noise_shape: tuple,
                          actualization_iterations: int = 50,
                          oscillator_steps: int = 100,
@@ -276,11 +276,11 @@ class PyQuifer(nn.Module):
 
         # Use the ingested and processed data as the initial specimen states
         initial_specimen_states = self._processed_data_storage
-        
+
         final_actualized_states = []
         kuramoto_rs = []
         archetypes = []
-        
+
         logger.info(f"\n--- Running Actualization for {num_cycles} cycles ---")
         for cycle in range(num_cycles):
             current_time_offset = time_offset + cycle * 0.1 # Example: time evolves
@@ -293,7 +293,7 @@ class PyQuifer(nn.Module):
                 noise_amplitude,
                 current_time_offset
             )
-            
+
             # For continuous simulation, feed previous final_state as new initial_specimen_states
             initial_specimen_states = final_state.detach()
 
@@ -346,14 +346,14 @@ class PyQuifer(nn.Module):
         """
         # Ingest data using the updated Automated Sieve and trigger Viscosity Control
         self.ingest_data(data) # This will store processed data in _processed_data_storage
-        
+
         if not isinstance(target_archetype_value, torch.Tensor):
             target_archetype_value = torch.tensor(target_archetype_value, dtype=torch.float32)
         target_archetype_value = target_archetype_value.to(self.device)
 
         # We need to ensure the archetype_vector is learnable.
         # It is by default in GenerativeWorldModel.
-        
+
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         archetype_learning_history = [self.model.archetype_vector.squeeze().detach().cpu().numpy()]
@@ -365,9 +365,9 @@ class PyQuifer(nn.Module):
 
         for epoch in range(learning_epochs):
             optimizer.zero_grad()
-            
+
             # Use ingested data as initial specimen states for training
-            initial_specimen_states = self._processed_data_storage 
+            initial_specimen_states = self._processed_data_storage
 
             # Forward pass: Run the model
             final_actualized_state, _, _, _ = self.model(
@@ -378,14 +378,14 @@ class PyQuifer(nn.Module):
                 noise_amplitude,
                 time_offset=epoch * 0.1 # Vary time offset for dynamic noise across epochs
             )
-            
+
             # Loss: How far is the current archetype_vector from our target
             # Note(S-14): Only archetype_vector receives backprop gradients here.
             # Oscillators evolve through their own Kuramoto dynamics (called in forward()),
             # not through this loss — this is by design (see SOMATIC_STEERING.md).
             # The actualization layer could benefit from a reconstruction loss in the future.
             loss = torch.mean((self.model.archetype_vector - target_archetype_value.unsqueeze(0))**2)
-            
+
             # Get Kuramoto Order Parameter for Live Feed
             kuramoto_r = self.model.frequency_bank.get_aggregated_order_parameter() # Use aggregated R
 
@@ -408,7 +408,7 @@ class PyQuifer(nn.Module):
 
         logger.info("\n--- Training Complete ---")
         logger.info(f"Final Learned Archetype: {self.model.archetype_vector.squeeze().detach().cpu().numpy()}")
-        
+
         return {
             "archetype_history": np.array(archetype_learning_history),
             "loss_history": loss_history
@@ -514,11 +514,11 @@ if __name__ == '__main__':
 
     fig = plt.figure(figsize=(14, 7))
     ax1 = fig.add_subplot(121, projection='3d')
-    ax1.plot(archetype_learning_history[:, 0], archetype_learning_history[:, 1], archetype_learning_history[:, 2], 
+    ax1.plot(archetype_learning_history[:, 0], archetype_learning_history[:, 1], archetype_learning_history[:, 2],
              marker='.', linestyle='-', color='blue', label='Learned Archetype Trajectory')
-    ax1.scatter(archetype_learning_history[0, 0], archetype_learning_history[0, 1], archetype_learning_history[0, 2], 
+    ax1.scatter(archetype_learning_history[0, 0], archetype_learning_history[0, 1], archetype_learning_history[0, 2],
                 color='green', s=100, label='Start Archetype', zorder=5)
-    ax1.scatter(target_archetype_value_tensor[0], target_archetype_value_tensor[1], target_archetype_value_tensor[2], 
+    ax1.scatter(target_archetype_value_tensor[0], target_archetype_value_tensor[1], target_archetype_value_tensor[2],
                 color='red', marker='X', s=150, label='Target Archetype', zorder=5)
     ax1.set_title("Archetype Evolution during Learning (PyQuifer API)")
     ax1.set_xlabel("Dimension 1")

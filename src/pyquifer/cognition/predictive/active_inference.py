@@ -9,11 +9,11 @@ Extracted from Deep_AIF and pymdp patterns. Key concepts:
 This enables oscillatory systems to act as active inference agents.
 """
 
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict, List
-import math
 
 
 def reparameterize(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:

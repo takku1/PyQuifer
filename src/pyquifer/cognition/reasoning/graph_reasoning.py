@@ -15,11 +15,12 @@ References:
 - Xu et al. (2020). Inductive Representation Learning on Temporal Graphs.
 """
 
+import math
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple, List
 
 
 class DynamicGraphAttention(nn.Module):

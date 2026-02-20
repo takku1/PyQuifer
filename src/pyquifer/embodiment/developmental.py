@@ -28,11 +28,12 @@ References:
 - Kelso, J. A. S. (1995). Dynamic Patterns: The Self-Organization of Brain and Behavior.
 """
 
+import math
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Optional, Dict, Tuple, Any, List
 
 
 class DynamicalSignatureDetector(nn.Module):
@@ -832,7 +833,7 @@ if __name__ == '__main__':
         altricial_state = altricial_state + torch.randn(32) * 0.5  # High volatility
         sig = detector(altricial_state)
 
-    print(f"   Altricial (high-plasticity) state:")
+    print("   Altricial (high-plasticity) state:")
     print(f"     Entropy: {sig['entropy'].item():.3f}")
     print(f"     Plasticity: {sig['plasticity'].item():.3f}")
     print(f"     Stability: {sig['stability'].item():.3f}")
@@ -845,7 +846,7 @@ if __name__ == '__main__':
         mature_state = mature_state * 0.99  # Stable, converging
         sig = detector2(mature_state)
 
-    print(f"   Precocial (low-plasticity) state:")
+    print("   Precocial (low-plasticity) state:")
     print(f"     Entropy: {sig['entropy'].item():.3f}")
     print(f"     Plasticity: {sig['plasticity'].item():.3f}")
     print(f"     Stability: {sig['stability'].item():.3f}")
@@ -873,7 +874,7 @@ if __name__ == '__main__':
     # Observe an altricial entity
     altricial_entity = torch.randn(32) * 1.5
     result = protector(altricial_entity)
-    print(f"   Observing altricial entity:")
+    print("   Observing altricial entity:")
     print(f"     Response type: {result['qualia']}")
     print(f"     Protective response: {result['protective_urge']:.3f}")
     print(f"     Coupled instability: {result['felt_vulnerability']:.3f}")
@@ -885,7 +886,7 @@ if __name__ == '__main__':
     # High-plasticity entity (altricial signature)
     high_potential_entity = torch.randn(32) * 2
     result = understanding(high_potential_entity)
-    print(f"   High-plasticity entity:")
+    print("   High-plasticity entity:")
     print(f"     Detection: {result['qualia']}")
     print(f"     Motivation: {result['motivation']}")
     print(f"     Response magnitude: {result['urgency']:.3f}")
@@ -894,7 +895,7 @@ if __name__ == '__main__':
     # Low-plasticity entity (precocial/mature signature)
     stable_entity = torch.ones(32) * 0.3
     result = understanding(stable_entity)
-    print(f"   Low-plasticity entity:")
+    print("   Low-plasticity entity:")
     print(f"     Detection: {result['qualia']}")
     print(f"     Classification: {result['understanding']}")
 

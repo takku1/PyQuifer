@@ -16,10 +16,11 @@ References:
 - Lisman & Jensen (2013). The theta-gamma neural code. Neuron.
 """
 
+import math
+from typing import Any, Dict, List, Optional
+
 import torch
 import torch.nn as nn
-import math
-from typing import Any, Dict, List, Optional, Tuple
 
 
 class SequenceAKOrN(nn.Module):

@@ -17,10 +17,10 @@ References:
 - Gurney, Prescott & Redgrave (2001): BG as action selection device.
 """
 
+from typing import List, NamedTuple, Set
+
 import torch
 import torch.nn as nn
-import math
-from typing import NamedTuple, Optional, List, Set
 
 
 class GatingOutput(NamedTuple):
