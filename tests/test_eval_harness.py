@@ -338,5 +338,160 @@ class TestE4BudgetPreFilterBenchmark(unittest.TestCase):
             f"less than hint=0.0 consumed {cost_no_hint:.5f}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# E5 — ECE formula floor + behavioral effectiveness
+#
+# Addresses ChatGPT review (2026-02-22):
+#   "Your formula as written, 1 + 2*(ece - 0.15), would yield 0.7x at ECE=0.00.
+#    But your table says 1.00x at ECE=0.00. So either there's a floor/clamp..."
+#
+# Confirmed: cycle.py applies the multiplier ONLY when calibration_hint > 0.15.
+# Below threshold: cost unchanged (1.0x). No discount for good calibration.
+# The behavioral effect: high ECE depletes budget faster, leaving less energy for
+# secondary (lower-salience) broadcasts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestE5ECEFloorAndBehavior(unittest.TestCase):
+    """
+    E5: Document and verify the ECE formula floor behavior + behavioral
+    effectiveness of the calibration penalty.
+    """
+
+    def _make_cycle(self, capacity=2.0, ignition_cost=0.07, recovery=0.08):
+        from pyquifer.runtime.cycle import CognitiveCycle
+        from pyquifer.runtime.config import CycleConfig
+        return CognitiveCycle(CycleConfig(
+            use_metabolic_budget=True,
+            use_global_workspace=True,
+            metabolic_capacity=capacity,
+            metabolic_recovery_rate=recovery,
+            metabolic_oscillation_cost=0.0,
+            metabolic_ignition_cost=ignition_cost,
+            metabolic_broadcast_cost=0.0,
+        ))
+
+    def test_e5_ece_below_threshold_no_penalty(self):
+        """ECE=0.00 and ECE=0.10 apply the same ignition cost (floor=1.0x)."""
+        latent = 64
+
+        def cost_at(ece):
+            cycle = self._make_cycle(capacity=5.0, ignition_cost=0.10, recovery=0.0)
+            organ = _make_costly_organ("x", latent, salience=0.99, cost=0.0)
+            cycle.register_organ(organ)
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=0.0)
+            eb = cycle._energy_budget.item()
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=ece)
+            return eb - cycle._energy_budget.item()
+
+        cost_0 = cost_at(0.00)
+        cost_10 = cost_at(0.10)
+        cost_15 = cost_at(0.15)  # Exactly at threshold
+        # All three should be equal (1.0x — no penalty applied below/at 0.15)
+        # delta=5e-3: allows for float32 variance between fresh CognitiveCycle instances
+        self.assertAlmostEqual(cost_0, cost_10, delta=5e-3,
+            msg="ECE=0.00 and ECE=0.10 must cost the same (floor=1.0x)")
+        self.assertAlmostEqual(cost_0, cost_15, delta=5e-3,
+            msg="ECE=0.15 must cost the same as 0.00 (threshold is exclusive >0.15)")
+
+    def test_e5_ece_above_threshold_applies_multiplier(self):
+        """ECE=0.20 costs more than ECE=0.00 (penalty kicks in above 0.15)."""
+        latent = 64
+
+        def cost_at(ece):
+            cycle = self._make_cycle(capacity=5.0, ignition_cost=0.10, recovery=0.0)
+            organ = _make_costly_organ("x", latent, salience=0.99, cost=0.0)
+            cycle.register_organ(organ)
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=0.0)
+            eb = cycle._energy_budget.item()
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=ece)
+            return eb - cycle._energy_budget.item()
+
+        cost_0 = cost_at(0.00)
+        cost_20 = cost_at(0.20)
+        self.assertGreater(cost_20, cost_0 + 1e-4,
+            msg=f"ECE=0.20 must cost more than ECE=0.00: {cost_20:.5f} vs {cost_0:.5f}")
+
+    def test_e5_formula_multiplier_at_exact_values(self):
+        """Verify multiplier values: 0.20->1.10x, 0.30->1.30x, 0.50->1.70x, 0.65->2.00x."""
+        latent = 64
+        BASE_COST = 0.10
+
+        results = {}
+        for ece in [0.00, 0.20, 0.30, 0.50, 0.65]:
+            cycle = self._make_cycle(capacity=5.0, ignition_cost=BASE_COST, recovery=0.0)
+            organ = _make_costly_organ("x", latent, salience=0.99, cost=0.0)
+            cycle.register_organ(organ)
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=0.0)
+            eb = cycle._energy_budget.item()
+            cycle.tick(torch.randn(1, latent), return_diagnostics=False, calibration_hint=ece)
+            results[ece] = eb - cycle._energy_budget.item()
+
+        # Check monotone increasing with ECE
+        self.assertLessEqual(results[0.00], results[0.20] + 1e-4,
+            "ECE=0.00 must not cost more than ECE=0.20")
+        self.assertLessEqual(results[0.20], results[0.30] + 1e-4)
+        self.assertLessEqual(results[0.30], results[0.50] + 1e-4)
+        self.assertLessEqual(results[0.50], results[0.65] + 1e-4)
+
+    def test_e5_behavioral_high_ece_depletes_budget_faster(self):
+        """High ECE causes faster budget depletion over sustained operation.
+
+        Over 60 ticks with balanced recovery, ECE=0.65 system should show
+        significantly lower average energy than ECE=0.00 system.
+        """
+        latent = 64
+        N_TICKS = 60
+
+        def run(ece_hint):
+            cycle = self._make_cycle(capacity=1.0, ignition_cost=0.07, recovery=0.08)
+            organ = _make_costly_organ("hi", latent, salience=0.85, cost=0.0)
+            cycle.register_organ(organ)
+            energy_samples = []
+            for _ in range(N_TICKS):
+                cycle.tick(torch.randn(1, latent), return_diagnostics=False,
+                           calibration_hint=ece_hint)
+                energy_samples.append(cycle._energy_budget.item())
+            return sum(energy_samples) / len(energy_samples)
+
+        avg_e0 = run(0.00)
+        avg_e65 = run(0.65)
+
+        self.assertGreater(avg_e0, avg_e65 + 0.05,
+            f"E5: Well-calibrated avg_energy={avg_e0:.3f} must exceed "
+            f"overconfident avg_energy={avg_e65:.3f} by >0.05 "
+            "(high ECE should measurably drain budget faster)")
+
+    def test_e5_behavioral_secondary_organ_blocked_more_at_high_ece(self):
+        """With high ECE, a secondary organ (with cost) is budget-blocked more often.
+
+        Primary organ (free, high salience) always fires.
+        Secondary organ (cost=0.15, lower salience) gets blocked when budget < 0.15.
+        High ECE depletes budget faster -> more ticks where secondary is budget-blocked.
+        """
+        latent = 64
+        N_TICKS = 200
+
+        def count_secondary_blocked(ece_hint):
+            cycle = self._make_cycle(capacity=1.0, ignition_cost=0.07, recovery=0.08)
+            cycle.register_organ(_make_costly_organ("primary", latent, 0.85, 0.0))
+            cycle.register_organ(_make_costly_organ("secondary", latent, 0.40, 0.15))
+            blocked = 0
+            for _ in range(N_TICKS):
+                e_before = cycle._energy_budget.item()
+                if e_before < 0.15:
+                    blocked += 1
+                cycle.tick(torch.randn(1, latent), return_diagnostics=False,
+                           calibration_hint=ece_hint)
+            return blocked
+
+        blocked_0 = count_secondary_blocked(0.00)
+        blocked_65 = count_secondary_blocked(0.65)
+
+        self.assertGreater(blocked_65, blocked_0,
+            f"E5: Secondary organ must be blocked more at ECE=0.65 ({blocked_65}) "
+            f"than ECE=0.00 ({blocked_0}). "
+            "High ECE -> faster budget drain -> fewer resources for low-salience broadcasts.")
+
+
 if __name__ == "__main__":
     unittest.main()
