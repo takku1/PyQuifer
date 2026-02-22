@@ -19,6 +19,7 @@ References:
 """
 
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Set
@@ -33,8 +34,10 @@ class Proposal:
     content: torch.Tensor         # Latent payload (workspace_dim after projection)
     salience: float               # Urgency/importance
     tags: Set[str] = field(default_factory=set)  # Domain labels
-    cost: float = 0.0            # Predicted compute
+    cost: float = 0.0            # Predicted compute cost (used for budget gating)
     organ_id: str = ""           # Source organ
+    timestamp: float = field(default_factory=time.monotonic)  # Creation time (monotonic)
+    source_trust: float = 1.0    # Provenance trust [0, 1]: 1.0=direct sensor, <1=derived/cached
 
 
 class Organ(nn.Module, ABC):
@@ -138,7 +141,8 @@ class OscillatoryWriteGate(nn.Module):
     def forward(self, organ_phase: torch.Tensor,
                 global_phase: torch.Tensor,
                 novelty: float = 0.5,
-                cost: float = 0.0) -> torch.Tensor:
+                cost: float = 0.0,
+                freshness: float = 1.0) -> torch.Tensor:
         """
         Compute write gate value.
 
@@ -147,16 +151,17 @@ class OscillatoryWriteGate(nn.Module):
             global_phase: Global workspace rhythm phase
             novelty: Novelty/surprise of the proposal content
             cost: Estimated computation cost
+            freshness: Recency weight [0, 1]: 1.0=just created, decays over time
 
         Returns:
-            gate: Scalar gate value in [0, 1]
+            gate: Scalar gate value in [0, 1], scaled by freshness
         """
         coherence = torch.cos(organ_phase - global_phase)
         logit = (self.w_coherence * coherence
                  + self.w_novelty * novelty
                  + self.w_cost * cost
                  + self.bias)
-        return torch.sigmoid(logit)
+        return torch.sigmoid(logit) * max(0.0, freshness)
 
 
 class PreGWAdapter(nn.Module):

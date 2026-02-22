@@ -713,10 +713,15 @@ class CognitiveCycle(nn.Module):
             organ.observe(sensory_input)
             proposal = organ.propose()
 
-            # Apply oscillatory write gate
+            # Apply oscillatory write gate (freshness decays proposals older than 30s)
+            import time as _time_mod
+            _age = _time_mod.monotonic() - proposal.timestamp
+            _freshness = max(0.0, 1.0 - _age / 30.0)
             gate_val = self._write_gate(
                 organ.phase, global_phase,
                 novelty=min(proposal.salience, 1.0),
+                cost=proposal.cost,
+                freshness=_freshness,
             ).item()
 
             # Scale write gate by bus coherence (if bus enabled)
@@ -767,6 +772,19 @@ class CognitiveCycle(nn.Module):
                 'bg_channel_activations': gating_out.channel_activations,
             }
 
+        # 1c. Budget pre-filter: drop costly proposals when metabolic budget is active
+        if self.config.use_metabolic_budget and len(proposals) > 1:
+            _remaining = self._energy_budget.item()
+            _budget_proposals = []
+            _cum_cost = 0.0
+            for _op in sorted(proposals, key=lambda x: x[2].salience, reverse=True):
+                _p_cost = max(0.0, _op[2].cost)
+                # Always keep first (highest-salience); then only if budget allows
+                if not _budget_proposals or _cum_cost + _p_cost <= _remaining:
+                    _budget_proposals.append(_op)
+                    _cum_cost += _p_cost
+            proposals = _budget_proposals
+
         # 2. Project to workspace dim and run competition
         ws_dim = self.config.workspace_dim
         n_items = len(proposals)
@@ -791,6 +809,8 @@ class CognitiveCycle(nn.Module):
         broadcast = gw_result['workspace'].squeeze(0)  # (workspace_dim,)
         winner_idx = gw_result['winners'][0].argmax().item()
         winner_id = proposals[winner_idx][2].organ_id
+        winner_confidence = float(gw_result['ignition_probs'][0].max().item())
+        winner_source_trust = proposals[winner_idx][2].source_trust
         self._diversity_tracker.record_win(winner_id)
 
         for organ, adapter, proposal in proposals:
@@ -815,6 +835,8 @@ class CognitiveCycle(nn.Module):
         return {
             'gw_broadcast': broadcast.detach(),
             'gw_winner': winner_id,
+            'gw_winner_confidence': winner_confidence,
+            'gw_winner_source_trust': winner_source_trust,
             'gw_saliences': saliences.detach().squeeze(0),
             'gw_did_ignite': gw_result['did_ignite'].any().item(),
             'gw_cycle_consistency_loss': cc_loss,

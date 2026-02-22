@@ -127,10 +127,16 @@ class ModulationState:
     # === Workspace / Organ state (when use_mcp_organs or use_global_workspace) ===
     workspace_winner_id: Optional[str] = None
     workspace_broadcast: Optional[torch.Tensor] = None
+    workspace_winner_confidence: float = 0.0   # Ignition probability of winning proposal [0, 1]
+    workspace_winner_source_trust: float = 1.0  # Provenance trust of winning proposal [0, 1]
 
     # === Basal ganglia gating (when use_gating_loop) ===
     gating_winner_id: Optional[str] = None
     gating_stn_active: bool = False
+
+    # === Energy/budget state (when use_metabolic_budget) ===
+    energy_budget: float = 1.0     # Remaining metabolic budget [0, 1]
+    energy_ratio: float = 1.0      # energy_budget / metabolic_capacity
 
     # === Latency ===
     step_latency_ms: float = 0.0
@@ -452,8 +458,12 @@ class PyQuiferBridge(nn.Module):
                 neuromodulator_levels=d['neuromodulator_levels'],
                 workspace_winner_id=d.get('gw_winner'),
                 workspace_broadcast=d.get('gw_broadcast'),
+                workspace_winner_confidence=float(d.get('gw_winner_confidence', 0.0)),
+                workspace_winner_source_trust=float(d.get('gw_winner_source_trust', 1.0)),
                 gating_winner_id=str(d['bg_selected_channel']) if 'bg_selected_channel' in d else None,
                 gating_stn_active=d.get('bg_stn_active', False),
+                energy_budget=float(d.get('metabolic', {}).get('energy_budget', 1.0)),
+                energy_ratio=float(d.get('metabolic', {}).get('energy_ratio', 1.0)),
                 step_latency_ms=latency_ms,
             )
             self._last_diagnostics = {
