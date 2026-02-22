@@ -208,6 +208,16 @@ class PyQuiferBridge(nn.Module):
 
         # Last diagnostic snapshot (updated by step_diagnostic / step(diagnostics='always'))
         self._last_diagnostics: dict = {}
+        # Calibration hint — ECE from ConfidenceTracker, passed to next tick
+        self._last_ece: float = 0.0
+
+    def set_calibration_hint(self, ece: float) -> None:
+        """Set ECE from ConfidenceTracker so next tick uses it as calibration_hint.
+
+        ECE > 0.15 causes CognitiveCycle to raise metabolic_ignition_cost by up to 3×,
+        making workspace ignition more conservative when calibration is poor.
+        """
+        self._last_ece = max(0.0, min(1.0, float(ece)))
 
     @staticmethod
     def default():
@@ -417,6 +427,7 @@ class PyQuiferBridge(nn.Module):
             result = self.cycle.tick(
                 sensory_input, reward=reward, sleep_signal=sleep_signal,
                 return_diagnostics=return_diagnostics,
+                calibration_hint=self._last_ece,
             )
 
         t1 = time.perf_counter()
@@ -472,6 +483,8 @@ class PyQuiferBridge(nn.Module):
                 'learning': result.get('learning', {}),
                 'diagnostics': d,
             }
+            # Update calibration hint for next tick (caller may set via set_calibration_hint)
+            # Only update if explicitly passed — preserves externally-set ECE
             return mod_state, self._last_diagnostics
         else:
             # Minimal path — unpack from TickResult (tensor-only NamedTuple)

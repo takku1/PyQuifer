@@ -712,6 +712,8 @@ class CognitiveCycle(nn.Module):
                                   global_phase=global_phase)
             organ.observe(sensory_input)
             proposal = organ.propose()
+            # Propagate organ provenance trust to proposal (organs know their own reliability)
+            proposal.source_trust = getattr(organ, 'source_trust', 0.75)
 
             # Apply oscillatory write gate (freshness decays proposals older than 30s)
             import time as _time_mod
@@ -849,6 +851,7 @@ class CognitiveCycle(nn.Module):
              reward: float = 0.0,
              sleep_signal: float = 0.0,
              return_diagnostics: bool = True,
+             calibration_hint: float = 0.0,
              ) -> Dict[str, Any]:
         """
         Run one cognitive tick.
@@ -862,6 +865,9 @@ class CognitiveCycle(nn.Module):
             return_diagnostics: If False, skip building the heavy diagnostics
                 dict and most .item() conversions.  Returns only the modulation
                 parameters needed by the LLM bridge.  ~2x faster on GPU.
+            calibration_hint: ECE from ConfidenceTracker [0, 1]. When >0.15,
+                raises metabolic_ignition_cost by 50% this tick (more conservative
+                workspace — fewer ignitions when system is miscalibrated).
 
         Returns:
             Dict with:
@@ -1731,8 +1737,13 @@ class CognitiveCycle(nn.Module):
                 tick_cost += c.metabolic_oscillation_cost * (0.5 + R_f)
 
                 # 2. Workspace ignition cost (if GW fired this tick)
+                # calibration_hint: high ECE → system is miscalibrated → raise ignition cost
+                # to make workspace more conservative (fewer ignitions, higher threshold)
+                _ign_cost = c.metabolic_ignition_cost
+                if calibration_hint > 0.15:
+                    _ign_cost = _ign_cost * (1.0 + 2.0 * (calibration_hint - 0.15))
                 if gw_info and gw_info.get('gw_winner', '') != '':
-                    tick_cost += c.metabolic_ignition_cost
+                    tick_cost += _ign_cost
 
                 # 3. Broadcast cost (ensemble cross-bleed writes)
                 if ensemble_info:

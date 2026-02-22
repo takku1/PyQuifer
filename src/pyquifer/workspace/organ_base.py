@@ -57,11 +57,13 @@ class Organ(nn.Module, ABC):
 
     def __init__(self, organ_id: str, latent_dim: int,
                  frequency: float = 1.0,
-                 standing_momentum: float = 0.9):
+                 standing_momentum: float = 0.9,
+                 source_trust: float = 0.75):
         super().__init__()
         self.organ_id = organ_id
         self.latent_dim = latent_dim
         self.standing_momentum = standing_momentum
+        self.source_trust = source_trust  # Provenance trust [0,1]; propagated to Proposals
 
         # Local oscillator state (not learned — evolves by dynamics)
         self.register_buffer('phase', torch.tensor(0.0))
@@ -217,7 +219,8 @@ class HPCOrgan(Organ):
 
     def __init__(self, latent_dim: int = 64, hierarchy_dims: Optional[list] = None,
                  frequency: float = 10.0):
-        super().__init__(organ_id="hpc", latent_dim=latent_dim, frequency=frequency)
+        super().__init__(organ_id="hpc", latent_dim=latent_dim, frequency=frequency,
+                         source_trust=0.70)  # Derived from HPC inference, not direct sensor
         if hierarchy_dims is None:
             hierarchy_dims = [latent_dim, latent_dim // 2, latent_dim // 4]
 
@@ -286,7 +289,7 @@ class MotivationOrgan(Organ):
 
     def __init__(self, latent_dim: int = 64, frequency: float = 0.5):
         super().__init__(organ_id="motivation", latent_dim=latent_dim,
-                         frequency=frequency)
+                         frequency=frequency, source_trust=0.60)  # Internal/speculative
         from pyquifer.cognition.control.motivation import IntrinsicMotivationSystem
         self.motivation = IntrinsicMotivationSystem(state_dim=latent_dim)
         self._last_result = None
@@ -335,7 +338,7 @@ class SelectionOrgan(Organ):
     def __init__(self, latent_dim: int = 64, num_groups: int = 6,
                  group_dim: int = 16, frequency: float = 2.0):
         super().__init__(organ_id="selection", latent_dim=latent_dim,
-                         frequency=frequency)
+                         frequency=frequency, source_trust=0.65)  # Competition output
         from pyquifer.identity.neural_darwinism import SelectionArena
         self.arena = SelectionArena(
             num_groups=num_groups, group_dim=group_dim, total_budget=10.0
