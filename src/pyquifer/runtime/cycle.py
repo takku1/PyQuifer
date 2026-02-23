@@ -1305,7 +1305,7 @@ class CognitiveCycle(nn.Module):
         # Thresholds are functional: derived from the homeostatic target (σ=1.0
         # targets R≈0.5), so extremes are genuinely outside normal dynamics.
         R = coherence  # already a tensor from oscillators
-        R_val = float(R) if isinstance(R, torch.Tensor) else R
+        R_val = float(R.detach()) if isinstance(R, torch.Tensor) else R
         if R_val > 0.85:
             processing_mode = 'perception'
         elif R_val < 0.2:

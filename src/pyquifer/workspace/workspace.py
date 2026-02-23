@@ -74,6 +74,9 @@ class GlobalWorkspace(nn.Module):
         self.broadcast = GlobalBroadcast(workspace_dim, module_dims)
 
         # Workspace state
+        self.workspace_content: torch.Tensor
+        self.workspace_occupied: torch.Tensor
+        self.current_time: torch.Tensor
         self.register_buffer('workspace_content', torch.zeros(1, workspace_dim))
         self.register_buffer('workspace_occupied', torch.tensor(False))
         self.register_buffer('current_time', torch.tensor(0))
