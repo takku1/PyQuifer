@@ -1958,9 +1958,9 @@ class CognitiveCycle(nn.Module):
             )
 
         # ── Diagnostic path: build full dicts (backward compat) ──
-        _coherence_f = float(coherence) if isinstance(coherence, torch.Tensor) else coherence
-        _dominant_state_f = int(dominant_state_t) if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
-        _comb_motiv_f = float(combined_motivation) if isinstance(combined_motivation, torch.Tensor) else combined_motivation
+        _coherence_f = float(coherence.detach()) if isinstance(coherence, torch.Tensor) else coherence
+        _dominant_state_f = int(dominant_state_t.detach()) if isinstance(dominant_state_t, torch.Tensor) else dominant_state_t
+        _comb_motiv_f = float(combined_motivation.detach()) if isinstance(combined_motivation, torch.Tensor) else combined_motivation
 
         modulation = {
             'temperature': temperature,
