@@ -24,7 +24,6 @@ from neurobench.models import NeuroBenchModel
 
 from pyquifer.dynamics.spiking.neurons import OscillatorySNN, SpikingLayer
 
-
 # ---------------------------------------------------------------------------
 # Composite network: SpikingLayer backbone + linear readout
 # ---------------------------------------------------------------------------
