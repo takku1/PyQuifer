@@ -157,6 +157,9 @@ class EmotionalGravityManifold(nn.Module):
     "snap out of" sadness - you have to traverse the manifold.
     """
 
+    position: torch.Tensor
+    velocity: torch.Tensor
+
     def __init__(self,
                  dim: int = 8,
                  num_attractors: int = 6,

@@ -429,6 +429,9 @@ class DopriSolver(BaseSolver):
       Mathematics of Computation 46(173), 135-150.
     """
 
+    _b5: torch.Tensor
+    _e: torch.Tensor
+
     def __init__(self, config: Optional[SolverConfig] = None):
         cfg = config or SolverConfig(method='dopri')
         super().__init__(cfg)

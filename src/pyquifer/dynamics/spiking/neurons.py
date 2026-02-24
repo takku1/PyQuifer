@@ -56,6 +56,9 @@ class LIFNeuron(nn.Module):
     Parameters are learnable for task-specific adaptation.
     """
 
+    log_tau: torch.Tensor
+    threshold: torch.Tensor
+
     def __init__(self,
                  tau: float = 10.0,
                  threshold: float = 1.0,
@@ -170,6 +173,8 @@ class SpikingLayer(nn.Module):
     A layer of LIF neurons with input projection and recurrent connections.
     Suitable for sequence processing with temporal credit assignment.
     """
+
+    weight_mask: Optional[torch.Tensor]
 
     def __init__(self,
                  input_dim: int,
@@ -418,6 +423,10 @@ class STDPLayer(nn.Module):
     Implements online, local Hebbian learning based on precise spike timing.
     Potentiation when pre-spike precedes post-spike, depression otherwise.
     """
+
+    pre_trace: torch.Tensor
+    post_trace: torch.Tensor
+    running_rate: torch.Tensor
 
     def __init__(self,
                  pre_size: int,
@@ -676,6 +685,8 @@ class SpikeEncoder(nn.Module):
         sigma: Width of Gaussian tuning curves (population mode)
     """
 
+    centers: Optional[torch.Tensor]
+
     def __init__(self,
                  num_neurons: int,
                  mode: Literal['rate', 'population'] = 'rate',
@@ -737,6 +748,8 @@ class SpikeDecoder(nn.Module):
         time_dim: Which dimension is the time/sequence dimension
     """
 
+    weights: Optional[torch.Tensor]
+
     def __init__(self,
                  num_neurons: int,
                  mode: Literal['rate', 'first_spike', 'population_vector'] = 'rate',
@@ -795,6 +808,9 @@ class SynapticDelay(nn.Module):
         num_synapses: Number of synapses (typically num_neurons)
         max_delay: Maximum delay in timesteps
     """
+
+    buffer: torch.Tensor
+    ptr: torch.Tensor
 
     def __init__(self, num_synapses: int, max_delay: int = 10):
         super().__init__()

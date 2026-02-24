@@ -43,6 +43,10 @@ class PredictiveLevel(nn.Module):
     Sends errors up + predictions down.
     """
 
+    beliefs: torch.Tensor
+    precision: torch.Tensor
+    error_variance: torch.Tensor
+
     def __init__(self,
                  input_dim: int,
                  belief_dim: int,
@@ -381,6 +385,8 @@ class OscillatoryPredictiveCoding(nn.Module):
     - Michalareas et al. (2016). Alpha-beta and gamma rhythms subserve
       feedback and feedforward influences.
     """
+
+    step_count: torch.Tensor
 
     def __init__(self, dims: List[int], lr: float = 0.01, inference_steps: int = 10,
                  alpha_beta_freq: float = 10.0, gamma_freq: float = 40.0):

@@ -35,6 +35,10 @@ class DendriticNeuron(nn.Module):
     dw_ff/dt = eta * plateau * (x_basal - mean(x_basal))
     """
 
+    last_basal_input: torch.Tensor
+    last_output: torch.Tensor
+    last_plateau: torch.Tensor
+
     def __init__(self, input_dim: int, output_dim: int,
                  apical_dim: Optional[int] = None,
                  plateau_threshold: float = 0.0,

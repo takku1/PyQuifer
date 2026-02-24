@@ -33,6 +33,8 @@ class PerturbationalComplexity(nn.Module):
     Simplified computational version suitable for neural network states.
     """
 
+    perturbation_patterns: torch.Tensor
+
     def __init__(self,
                  state_dim: int,
                  num_perturbations: int = 10,
@@ -175,6 +177,8 @@ class IntegrationMeasure(nn.Module):
     Related to Phi in Integrated Information Theory.
     """
 
+    partitions: torch.Tensor
+
     def __init__(self, state_dim: int, num_partitions: int = 4):
         """
         Args:
@@ -277,6 +281,10 @@ class DifferentiationMeasure(nn.Module):
     Conscious systems have high differentiation (many possible experiences).
     """
 
+    state_memory: torch.Tensor
+    memory_ptr: torch.Tensor
+    memory_filled: torch.Tensor
+
     def __init__(self, state_dim: int, memory_size: int = 100):
         """
         Args:
@@ -378,6 +386,9 @@ class ConsciousnessMonitor(nn.Module):
     2. An intrinsic reward signal for self-organization
     3. A way to compare different model configurations
     """
+
+    consciousness_history: torch.Tensor
+    history_ptr: torch.Tensor
 
     def __init__(self,
                  state_dim: int,

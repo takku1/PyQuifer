@@ -22,7 +22,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -113,7 +113,7 @@ class ConfidenceEstimator(nn.Module):
 
         # Historical calibration
         self.prediction_history: deque = deque(maxlen=1000)
-        self.calibration_bins = {i: {"predicted": [], "actual": []} for i in range(10)}
+        self.calibration_bins: Dict[int, Dict[str, List]] = {i: {"predicted": [], "actual": []} for i in range(10)}
 
     def estimate(self,
                  step_embedding: torch.Tensor,
@@ -428,7 +428,7 @@ class MetacognitiveLoop(nn.Module):
     def observe_step(self,
                     content: str,
                     embedding: torch.Tensor,
-                    evidence: List[str] = None,
+                    evidence: Optional[List[str]] = None,
                     reasoning_type: str = "deduction") -> ReasoningStep:
         """Observe and evaluate a reasoning step."""
 

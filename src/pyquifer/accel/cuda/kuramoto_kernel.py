@@ -209,7 +209,7 @@ class TensorDiagnostics:
     @staticmethod
     def to_tensor_dict(
         diagnostics: Dict[str, Any],
-        device: torch.device = None,
+        device: Optional[torch.device] = None,
     ) -> Dict[str, Any]:
         """Convert mixed float/tensor dict to all-tensor dict.
 
@@ -220,7 +220,7 @@ class TensorDiagnostics:
         Returns:
             Dict where numeric values are tensors, others unchanged
         """
-        result = {}
+        result: Dict[str, Any] = {}
         for k, v in diagnostics.items():
             if isinstance(v, (int, float)):
                 t = torch.tensor(v, dtype=torch.float32)
@@ -250,7 +250,7 @@ class TensorDiagnostics:
         Returns:
             Dict with Python float/int/list values
         """
-        result = {}
+        result: Dict[str, Any] = {}
         for k, v in tensor_dict.items():
             if isinstance(v, torch.Tensor):
                 if v.dim() == 0:

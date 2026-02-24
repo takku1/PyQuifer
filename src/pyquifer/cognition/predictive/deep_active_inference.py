@@ -18,7 +18,7 @@ PredictiveDecoder, ExpectedFreeEnergy).
 """
 
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -257,7 +257,7 @@ class PolicyNetwork(nn.Module):
             log probability [B].
         """
         if self.discrete:
-            logits = self.forward(z)
+            logits: torch.Tensor = self.forward(z)  # type: ignore[assignment]
             if deterministic:
                 action_idx = logits.argmax(dim=-1)
                 action = F.one_hot(action_idx, self.action_dim).float()
@@ -271,7 +271,7 @@ class PolicyNetwork(nn.Module):
                 log_prob = dist.log_prob(action_idx)
             return action, log_prob
         else:
-            mean, log_std = self.forward(z)
+            mean, log_std = self.forward(z)  # type: ignore[misc]
             if deterministic:
                 action = torch.tanh(mean)
                 # Log prob of tanh-squashed Gaussian at the mean
@@ -307,13 +307,13 @@ class PolicyNetwork(nn.Module):
             Log probability [B].
         """
         if self.discrete:
-            logits = self.forward(z)
+            logits: torch.Tensor = self.forward(z)  # type: ignore[assignment]
             # action is one-hot; recover index
             action_idx = action.argmax(dim=-1)
             log_probs = F.log_softmax(logits, dim=-1)
             return log_probs.gather(1, action_idx.unsqueeze(-1)).squeeze(-1)
         else:
-            mean, log_std = self.forward(z)
+            mean, log_std = self.forward(z)  # type: ignore[misc]
             std = log_std.exp()
             dist = Normal(mean, std)
 
@@ -337,11 +337,11 @@ class PolicyNetwork(nn.Module):
             Entropy [B].
         """
         if self.discrete:
-            logits = self.forward(z)
+            logits: torch.Tensor = self.forward(z)  # type: ignore[assignment]
             dist = Categorical(logits=logits)
             return dist.entropy()
         else:
-            _, log_std = self.forward(z)
+            _, log_std = self.forward(z)  # type: ignore[misc]
             # Gaussian entropy: 0.5 * ln(2*pi*e) * D + sum(log_std)
             return (0.5 * math.log(2 * math.pi * math.e) + log_std).sum(dim=-1)
 
@@ -703,7 +703,7 @@ class MultiStepPlanner:
         K = self.horizon
 
         # Get policy logits for initial sampling distribution
-        logits = self.policy.forward(current_latent)  # [B, action_dim]
+        logits: torch.Tensor = self.policy.forward(current_latent)  # type: ignore[assignment]  # [B, action_dim]
 
         # Initialize categorical probabilities for each step
         # [B, K, action_dim]
@@ -1053,7 +1053,7 @@ class DeepAIF(nn.Module):
         batch_size: int = 64,
         world_model_lr: float = 1e-3,
         policy_lr: float = 3e-4,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """
         Perform one training step with alternating optimization.
 
@@ -1116,7 +1116,7 @@ class DeepAIF(nn.Module):
 
     def _world_model_step(
         self, batch: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """
         Update world model: encoder, decoder, transition.
 
@@ -1183,7 +1183,7 @@ class DeepAIF(nn.Module):
 
     def _policy_step(
         self, batch: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """
         Update policy by minimizing multi-step EFE via gradient descent.
 

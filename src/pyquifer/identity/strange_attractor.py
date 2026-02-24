@@ -47,6 +47,8 @@ class LorenzAttractor(nn.Module):
     Parameters sigma, rho, beta control the "shape" of personality.
     """
 
+    state: torch.Tensor
+
     def __init__(self,
                  sigma: float = 10.0,  # Prandtl number
                  rho: float = 28.0,    # Rayleigh number
@@ -154,6 +156,10 @@ class PersonalityAttractor(nn.Module):
 
     The attractor's parameters define the "signature" of personality.
     """
+
+    state: torch.Tensor
+    velocity: torch.Tensor
+    perturbation_state: torch.Tensor
 
     def __init__(self,
                  dim: int = 16,
@@ -398,6 +404,8 @@ class FractalSelfModel(nn.Module):
 
     The "self" is the invariant pattern across all these dynamics.
     """
+
+    time: torch.Tensor
 
     def __init__(self,
                  dim: int = 32,

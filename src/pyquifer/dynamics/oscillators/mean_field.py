@@ -45,6 +45,11 @@ class KuramotoDaidoMeanField(nn.Module):
                       (Montbrio-Pazo-Roxin scaled approximation)
     """
 
+    delta: torch.Tensor
+    Z_real: torch.Tensor
+    Z_imag: torch.Tensor
+    step_count: torch.Tensor
+
     def __init__(self,
                  omega_mean: float = 1.0,
                  delta: float = 0.1,

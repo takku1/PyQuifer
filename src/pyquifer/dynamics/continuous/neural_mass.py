@@ -48,6 +48,11 @@ class WilsonCowanPopulation(nn.Module):
         dt: Integration timestep
     """
 
+    E: torch.Tensor
+    I: torch.Tensor
+    E_history: torch.Tensor
+    hist_ptr: torch.Tensor
+
     def __init__(self,
                  tau_E: float = 10.0,
                  tau_I: float = 5.0,

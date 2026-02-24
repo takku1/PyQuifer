@@ -32,6 +32,8 @@ class PhaseGate(nn.Module):
     Inspired by Pascal Fries' "Communication Through Coherence" theory.
     """
 
+    phase_preferences: Optional[torch.Tensor]
+
     def __init__(self,
                  dim: int,
                  num_phases: int = 4,
@@ -214,6 +216,9 @@ class TemporalMultiplexer(nn.Module):
     without interference. Useful for handling competing sensory inputs.
     """
 
+    stream_phases: torch.Tensor
+    current_phase: torch.Tensor
+
     def __init__(self,
                  num_streams: int,
                  stream_dim: int,
@@ -305,6 +310,8 @@ class PhaseEncoder(nn.Module):
     Based on hippocampal phase precession (O'Keefe, Buzsaki).
     """
 
+    bin_centers: torch.Tensor
+
     def __init__(self,
                  input_dim: int,
                  num_phase_bins: int = 8,
@@ -385,6 +392,10 @@ class NestedOscillator(nn.Module):
     This creates a hierarchical temporal structure for organizing
     information across multiple timescales.
     """
+
+    slow_phase: torch.Tensor
+    fast_phase: torch.Tensor
+    prev_slow_phase: torch.Tensor
 
     def __init__(self,
                  slow_freq: float = 8.0,

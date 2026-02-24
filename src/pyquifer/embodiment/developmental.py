@@ -48,6 +48,10 @@ class DynamicalSignatureDetector(nn.Module):
     - Branching: How many possible futures?
     """
 
+    state_history: torch.Tensor
+    history_ptr: torch.Tensor
+    history_filled: torch.Tensor
+
     def __init__(self, dim: int, history_length: int = 20):
         """
         Args:
@@ -334,6 +338,9 @@ class ProtectiveDrive(nn.Module):
     3. Shared entropy creates motivation to reduce joint uncertainty
     4. Protective action = minimize coupled system's free energy
     """
+
+    self_state: torch.Tensor
+    self_entropy: torch.Tensor
 
     def __init__(self, dim: int, coupling_strength: float = 0.5):
         """
@@ -725,6 +732,10 @@ class PotentialActualization(nn.Module):
     - Waddington, C.H. (1957). The Strategy of the Genes (epigenetic landscape)
     - Friston, K. (2010). The free-energy principle (precision-weighted prediction)
     """
+
+    potential: torch.Tensor
+    actualized: torch.Tensor
+    age: torch.Tensor
 
     def __init__(self, dim: int, maturation_rate: float = 0.01):
         """

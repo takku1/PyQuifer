@@ -49,6 +49,8 @@ class SafetyEnvelope(nn.Module):
     σ(x) → [0,1] where higher uncertainty produces stronger signaling.
     """
 
+    warmth: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  uncertainty_threshold: float = 0.7,
@@ -173,6 +175,9 @@ class SupervisoryModule(nn.Module):
     preventing catastrophic state transitions (absorbing states).
     """
 
+    current_threshold: torch.Tensor
+    vigilance: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  base_intervention_threshold: float = 0.8,
@@ -294,6 +299,8 @@ class ReflexToStrategy(nn.Module):
     - Thelen, E. & Smith, L.B. (1994). A Dynamic Systems Approach to Development.
     - Karmiloff-Smith, A. (1992). Beyond Modularity.
     """
+
+    age: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -443,6 +450,9 @@ class LimbicResonance(nn.Module):
     - Feldman, R. (2017). The Neurobiology of Human Attachments. Trends Cogn Sci.
     - Levy, J. et al. (2017). Oxytocin selectively modulates brain response. NeuroImage.
     """
+
+    parent_phase: torch.Tensor
+    baby_phase: torch.Tensor
 
     def __init__(self,
                  dim: int,

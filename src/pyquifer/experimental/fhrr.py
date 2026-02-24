@@ -21,7 +21,7 @@ References:
 """
 
 import math
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -42,6 +42,8 @@ class FHRREncoder(nn.Module):
         dim: Hypervector dimension.
         num_symbols: Size of codebook for discrete symbols.
     """
+
+    codebook_phases: torch.Tensor
 
     def __init__(self, dim: int, num_symbols: int = 256):
         super().__init__()
@@ -353,7 +355,7 @@ class NeuromorphicExporter:
         Returns:
             Dict with hardware configuration
         """
-        config = {
+        config: Dict[str, Any] = {
             'target': self.target,
             'num_parameters': sum(p.numel() for p in model.parameters()),
             'layers': [],

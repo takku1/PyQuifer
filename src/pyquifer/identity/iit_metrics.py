@@ -120,6 +120,8 @@ class EarthMoverDistance(nn.Module):
     For small distributions, uses the Sinkhorn algorithm for differentiability.
     """
 
+    cost_matrix: torch.Tensor
+
     def __init__(self,
                  n_states: int,
                  use_hamming: bool = True,
@@ -292,6 +294,8 @@ class PartitionedInformation(nn.Module):
     For n > 12: uses random sampling with heuristic refinement.
     """
 
+    partitions: torch.Tensor
+
     # Threshold for exhaustive enumeration
     EXHAUSTIVE_THRESHOLD = 12
 
@@ -457,6 +461,10 @@ class IntegratedInformation(nn.Module):
 
     This is a differentiable approximation suitable for neural networks.
     """
+
+    state_history: torch.Tensor
+    history_ptr: torch.Tensor
+    history_filled: torch.Tensor
 
     def __init__(self,
                  state_dim: int,
@@ -796,6 +804,9 @@ class IITConsciousnessMonitor(nn.Module):
 
     Can be used as an intrinsic reward signal or diagnostic tool.
     """
+
+    phi_history: torch.Tensor
+    phi_ptr: torch.Tensor
 
     def __init__(self,
                  state_dim: int,

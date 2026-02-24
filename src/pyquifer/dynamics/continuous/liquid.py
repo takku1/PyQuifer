@@ -341,6 +341,11 @@ class MetastableCell(nn.Module):
     Cross-frequency coupling allows theta to gate gamma bursts.
     """
 
+    gamma_phase: torch.Tensor
+    gamma_amp: torch.Tensor
+    theta_phase: torch.Tensor
+    theta_var: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  gamma_freq: float = 40.0,

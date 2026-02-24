@@ -53,6 +53,12 @@ class AvalancheDetector(nn.Module):
     Monitors activity and identifies avalanche events for analysis.
     """
 
+    in_avalanche: torch.Tensor
+    current_size: torch.Tensor
+    avalanche_sizes: torch.Tensor
+    size_ptr: torch.Tensor
+    num_avalanches: torch.Tensor
+
     def __init__(self,
                  activity_threshold: float = 0.5,
                  min_avalanche_size: int = 2,
@@ -206,6 +212,9 @@ class BranchingRatio(nn.Module):
                    (legacy, can blow up on bursty subcritical data)
     """
 
+    activity_history: torch.Tensor
+    history_ptr: torch.Tensor
+
     def __init__(self, window_size: int = 50, variance_threshold: float = 1e-10,
                  estimator: str = 'ratio_of_means'):
         """
@@ -322,6 +331,9 @@ class KuramotoCriticalityMonitor(nn.Module):
         critical_R_high: Upper bound of critical R band (default 0.7)
     """
 
+    R_history: torch.Tensor
+    hist_ptr: torch.Tensor
+
     def __init__(self, window_size: int = 50,
                  critical_R_low: float = 0.3,
                  critical_R_high: float = 0.7):
@@ -434,6 +446,14 @@ class KoopmanBifurcationDetector(nn.Module):
         rank: SVD truncation rank for DMD
         compute_every: Only recompute eigenvalues every N steps
     """
+
+    history: torch.Tensor
+    hist_ptr: torch.Tensor
+    stability_margin: torch.Tensor
+    stability_margin_std: torch.Tensor
+    max_eigenvalue_mag: torch.Tensor
+    approaching_bifurcation: torch.Tensor
+    consecutive_triggers: torch.Tensor
 
     def __init__(self,
                  state_dim: int,

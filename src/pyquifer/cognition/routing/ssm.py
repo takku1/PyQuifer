@@ -324,6 +324,9 @@ class OscillatorySSM(nn.Module):
         expand: Expansion factor.
     """
 
+    omega: torch.Tensor
+    _phase: torch.Tensor
+
     def __init__(
         self,
         d_model: int,

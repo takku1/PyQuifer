@@ -152,7 +152,7 @@ class LinOSSLayer(nn.Module):
             # Update each oscillator (TODO: batch across oscillators for perf)
             new_states = []
             for i, osc in enumerate(self.oscillators):
-                A, B = osc.get_state_matrix(self.dt)
+                A, B = osc.get_state_matrix(self.dt)  # type: ignore[union-attr]
 
                 # State update: s_{t+1} = A @ s_t + B @ f_t
                 s = states[:, i, :]  # (batch, 2)
@@ -163,15 +163,15 @@ class LinOSSLayer(nn.Module):
             all_states.append(states)
 
         # Stack all timesteps
-        all_states = torch.stack(all_states, dim=1)  # (batch, seq_len, num_oscillators, 2)
+        all_states_t = torch.stack(all_states, dim=1)  # (batch, seq_len, num_oscillators, 2)
 
         # Flatten oscillator states and project to output
-        flat_states = all_states.reshape(batch_size, seq_len, -1)  # (batch, seq_len, num_oscillators*2)
+        flat_states = all_states_t.reshape(batch_size, seq_len, -1)  # (batch, seq_len, num_oscillators*2)
         output = self.output_mix(flat_states)  # (batch, seq_len, hidden_dim)
         output = self.layer_norm(output)
 
         if return_states:
-            return output, all_states
+            return output, all_states_t  # type: ignore[return-value]
         return output
 
     def get_final_state(self, x: torch.Tensor) -> torch.Tensor:
@@ -324,4 +324,4 @@ if __name__ == '__main__':
     # Example 4: Oscillator frequency analysis
     print("\n4. Oscillator Frequencies (learned)")
     for i, osc in enumerate(layer.oscillators):
-        print(f"   Oscillator {i}: omega={osc.omega.item():.3f}, zeta={osc.zeta.item():.4f}")
+        print(f"   Oscillator {i}: omega={osc.omega.item():.3f}, zeta={osc.zeta.item():.4f}")  # type: ignore[union-attr]

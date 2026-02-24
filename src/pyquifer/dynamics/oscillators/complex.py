@@ -106,6 +106,13 @@ class ComplexCoupling(nn.Module):
             :class:`LearnableKuramotoBank`).
     """
 
+    adjacency: Optional[torch.Tensor]
+    self_mask: Optional[torch.Tensor]
+    _edge_src: Optional[torch.Tensor]
+    _edge_dst: Optional[torch.Tensor]
+    _edge_weight: Optional[torch.Tensor]
+    _degree: Optional[torch.Tensor]
+
     def __init__(
         self,
         num_oscillators: int,

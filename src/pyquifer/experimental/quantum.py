@@ -80,6 +80,8 @@ class QuantumState(nn.Module):
     Implements via real tensors with shape (..., dim, 2) for [real, imag].
     """
 
+    state: torch.Tensor
+
     def __init__(self, dim: int, batch_size: int = 1):
         """
         Args:
@@ -203,6 +205,8 @@ class ProjectiveMeasurement(nn.Module):
 
     Post-measurement state: |e_i> (the measured eigenstate)
     """
+
+    basis: torch.Tensor
 
     def __init__(self, dim: int, num_outcomes: int):
         """
@@ -354,6 +358,8 @@ class QuantumEntanglement(nn.Module):
     Implemented via tensor product Hilbert spaces and
     non-separable states.
     """
+
+    trace_b_projector: torch.Tensor
 
     def __init__(self, dim_a: int, dim_b: int):
         """
@@ -583,6 +589,11 @@ class QuantumMemory(nn.Module):
     - Context-sensitive recall
     - Graceful degradation under noise
     """
+
+    contents: torch.Tensor
+    keys: torch.Tensor
+    occupancy: torch.Tensor
+    write_ptr: torch.Tensor
 
     def __init__(self,
                  memory_dim: int = 64,

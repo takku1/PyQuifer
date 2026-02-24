@@ -482,6 +482,8 @@ class SphericalKuramotoBank(nn.Module):
     similar to brain frequency bands (theta, alpha, beta, gamma).
     """
 
+    states: torch.Tensor
+
     def __init__(self,
                  num_bands: int = 4,
                  oscillators_per_band: int = 16,

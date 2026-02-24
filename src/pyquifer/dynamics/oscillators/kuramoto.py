@@ -67,6 +67,19 @@ class LearnableKuramotoBank(nn.Module):
     - Optional learnable adjacency matrix for discovering connectivity patterns
     """
 
+    phases: torch.Tensor
+    phase_velocity_var: torch.Tensor
+    prev_phases: torch.Tensor
+    precision: torch.Tensor
+    _scratch_norm: torch.Tensor
+    _scratch_interaction: torch.Tensor
+    adjacency: Optional[torch.Tensor]
+    self_mask: Optional[torch.Tensor]
+    _edge_src: Optional[torch.Tensor]
+    _edge_dst: Optional[torch.Tensor]
+    _edge_weight: Optional[torch.Tensor]
+    _degree: Optional[torch.Tensor]
+
     def __init__(self,
                  num_oscillators: int,
                  dt: float = 0.01,
@@ -916,6 +929,12 @@ class SensoryCoupling(nn.Module):
     design invariant: oscillators evolve through own dynamics, gradient flow from
     the language model is severed by design.
     """
+
+    freq_projection: torch.Tensor
+    phase_projection: torch.Tensor
+    input_ema: torch.Tensor
+    input_var_ema: torch.Tensor
+    prev_input_norm: torch.Tensor
 
     def __init__(
         self,

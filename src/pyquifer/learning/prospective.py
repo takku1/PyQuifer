@@ -16,7 +16,7 @@ References:
   foundation for learning beyond backpropagation. Nature Neuroscience.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -268,7 +268,7 @@ class InferThenModify(nn.Module):
         self,
         x: torch.Tensor,
         target: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """Run infer-then-modify learning.
 
         Args:
@@ -291,12 +291,12 @@ class InferThenModify(nn.Module):
         loss = F.mse_loss(current_output, target)
 
         # Phase 2: Prospective inference (backward from target)
-        prospective = [None] * (self.num_layers + 1)
+        prospective: List[Optional[torch.Tensor]] = [None] * (self.num_layers + 1)
         prospective[-1] = target
 
         for i in range(self.num_layers - 1, -1, -1):
             if prospective[i + 1] is not None:
-                inference_result = self.inference_modules[i].infer(
+                inference_result = self.inference_modules[i].infer(  # type: ignore[union-attr]
                     activities[i + 1], prospective[i + 1]
                 )
                 prospective[i + 1] = inference_result['activity']
@@ -305,10 +305,10 @@ class InferThenModify(nn.Module):
         total_update_norm = 0.0
         for i in range(self.num_layers):
             if prospective[i + 1] is not None:
-                mod_result = self.layers[i].modify(
+                mod_result = self.layers[i].modify(  # type: ignore[union-attr]
                     activities[i].detach(),
                     activities[i + 1].detach(),
-                    prospective[i + 1].detach(),
+                    prospective[i + 1].detach(),  # type: ignore[union-attr]
                 )
                 total_update_norm += mod_result['weight_update_norm'].item()
 

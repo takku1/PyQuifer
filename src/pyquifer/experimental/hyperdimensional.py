@@ -83,6 +83,9 @@ class HypervectorMemory(nn.Module):
     Retrieval is via circular correlation with the key.
     """
 
+    memory: torch.Tensor
+    num_stored: torch.Tensor
+
     def __init__(self, dim: int, capacity: int = 100):
         """
         Args:
@@ -296,6 +299,10 @@ class HDCReasoner(nn.Module):
     - Similarity: Compare concepts via cosine similarity
     - Sequence: Encode order using permutation
     """
+
+    roles: torch.Tensor
+    perm: torch.Tensor
+    inv_perm: torch.Tensor
 
     def __init__(self,
                  dim: int,

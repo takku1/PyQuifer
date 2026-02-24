@@ -44,6 +44,8 @@ class MirrorResonance(nn.Module):
     adaptive_coupling=True to boost coupling when coherence is low.
     """
 
+    phases: torch.Tensor
+
     def __init__(self,
                  action_dim: int,
                  coupling_strength: float = 0.5,
@@ -217,6 +219,8 @@ class SocialCoupling(nn.Module):
     Creates a "social field" where agents' oscillators are coupled.
     This implements the principle that harming others = destabilizing self.
     """
+
+    agent_phases: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -489,6 +493,8 @@ class ConstitutionalResonance(nn.Module):
     This implements governance without voting - just phase synchronization.
     """
 
+    agent_phases: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  num_agents: int,
@@ -607,6 +613,9 @@ class OscillatoryEconomy(nn.Module):
     Trade restores equilibrium between agents' oscillatory states.
     "Fair" trades increase global coherence; "unfair" trades create discord.
     """
+
+    holdings: torch.Tensor
+    social_phase: torch.Tensor
 
     def __init__(self,
                  num_agents: int,

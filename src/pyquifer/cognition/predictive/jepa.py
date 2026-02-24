@@ -288,7 +288,7 @@ class ActionJEPA(nn.Module):
 
         # Regularization
         if reg_type == 'vicreg':
-            self.reg_loss = VICRegLoss()
+            self.reg_loss: nn.Module = VICRegLoss()
         else:
             self.reg_loss = BarlowLoss()
 

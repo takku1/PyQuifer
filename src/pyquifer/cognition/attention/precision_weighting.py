@@ -34,6 +34,10 @@ class PrecisionEstimator(nn.Module):
     precision (e.g., ACh boosts learning precision, NE boosts attention).
     """
 
+    running_var: torch.Tensor
+    running_mean: torch.Tensor
+    step_count: torch.Tensor
+
     def __init__(self,
                  num_channels: int,
                  tau: float = 50.0,

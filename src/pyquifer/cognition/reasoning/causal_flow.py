@@ -186,6 +186,10 @@ class CausalFlowMap(nn.Module):
     (net importers).
     """
 
+    time_series: torch.Tensor
+    ts_ptr: torch.Tensor
+    flow_matrix: torch.Tensor
+
     def __init__(self,
                  num_populations: int,
                  num_bins: int = 8,
@@ -318,6 +322,10 @@ class DominanceDetector(nn.Module):
     - Dominance > 0.5 → perception mode (errors dominate)
     - Dominance < 0.5 → imagination mode (predictions dominate)
     """
+
+    level_history: torch.Tensor
+    hist_ptr: torch.Tensor
+    dominance_ratio: torch.Tensor
 
     def __init__(self,
                  num_levels: int = 3,

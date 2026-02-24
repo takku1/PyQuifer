@@ -33,6 +33,14 @@ class NoveltyDetector(nn.Module):
     longer-term memory for detecting true novelty vs. noise.
     """
 
+    fast_mean: torch.Tensor
+    slow_mean: torch.Tensor
+    fast_var: torch.Tensor
+    slow_var: torch.Tensor
+    memory: torch.Tensor
+    memory_ptr: torch.Tensor
+    memory_filled: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  memory_size: int = 100,
@@ -193,6 +201,12 @@ class MasterySignal(nn.Module):
     as a motivational signal.
     """
 
+    performance_history: torch.Tensor
+    history_ptr: torch.Tensor
+    history_filled: torch.Tensor
+    frustration: torch.Tensor
+    best_performance: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  window_size: int = 20,
@@ -318,6 +332,10 @@ class CoherenceReward(nn.Module):
     Decreasing coherence = confusion (can trigger exploration)
     """
 
+    coherence_history: torch.Tensor
+    history_ptr: torch.Tensor
+    last_aha_magnitude: torch.Tensor
+
     def __init__(self,
                  coherence_history_size: int = 10,
                  aha_threshold: float = 0.3,
@@ -406,6 +424,10 @@ class EpistemicValue(nn.Module):
 
     Inspired by ActiveInference.jl's epistemic value computation.
     """
+
+    belief_counts: torch.Tensor
+    prior_entropy: torch.Tensor
+    step_count: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -529,6 +551,8 @@ class IntrinsicMotivationSystem(nn.Module):
     - Attention (aha moments -> focus on what just clicked)
     - Effort (mastery signals -> keep practicing what works)
     """
+
+    baseline_arousal: torch.Tensor
 
     def __init__(self,
                  state_dim: int,

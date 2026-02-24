@@ -44,6 +44,8 @@ class OrnsteinUhlenbeckNoise(nn.Module):
         dt: Integration timestep
     """
 
+    state: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  tau: float = 10.0,
@@ -97,6 +99,12 @@ class AdaptiveStochasticResonance(nn.Module):
     keeps the direction that improves SNR. Connects to criticality
     (optimal noise is proportional to distance from criticality).
     """
+
+    noise_level: torch.Tensor
+    current_snr: torch.Tensor
+    step_count: torch.Tensor
+    snr_history: torch.Tensor
+    noise_history: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -293,6 +301,10 @@ class ResonanceMonitor(nn.Module):
     when the optimal noise suddenly changes, the input distribution
     has changed.
     """
+
+    noise_history: torch.Tensor
+    snr_history: torch.Tensor
+    history_ptr: torch.Tensor
 
     def __init__(self,
                  window_size: int = 50,

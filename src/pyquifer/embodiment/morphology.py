@@ -38,6 +38,9 @@ class TensionField(nn.Module):
     that holds motor patterns even when the cortex isn't attending.
     """
 
+    tension: torch.Tensor
+    velocity: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  persistence: float = 0.99,
@@ -137,6 +140,10 @@ class PeripheralGanglion(nn.Module):
     Key property: Can process locally without central (cortical) involvement.
     Only relays to central system when thresholds exceeded.
     """
+
+    local_activity: torch.Tensor
+    input_history: torch.Tensor
+    history_ptr: torch.Tensor
 
     def __init__(self,
                  input_dim: int,
@@ -268,6 +275,9 @@ class SleepWakeController(nn.Module):
     The controller decides when to "wake up" based on input salience
     and when to "sleep" based on energy depletion.
     """
+
+    state: torch.Tensor
+    energy: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -428,6 +438,9 @@ class MorphologicalMemory(nn.Module):
     This is analogous to how a musician's hands "know" a piece
     through motor patterns, not declarative recall.
     """
+
+    phase: torch.Tensor
+    active_skill: torch.Tensor
 
     def __init__(self,
                  dim: int,

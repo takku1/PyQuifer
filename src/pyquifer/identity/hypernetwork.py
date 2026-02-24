@@ -497,7 +497,7 @@ if __name__ == '__main__':
     for t in range(5):
         output, state = ctx_reservoir(x, context, state)
 
-    print(f"   Final state norm: {state.norm().item():.3f}")
+    print(f"   Final state norm: {state.norm().item():.3f}")  # type: ignore[union-attr]
 
     # Gradient check
     loss = output.sum()

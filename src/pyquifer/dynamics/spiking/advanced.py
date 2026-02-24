@@ -209,6 +209,8 @@ class RecurrentSynapticLayer(nn.Module):
     pattern completion.
     """
 
+    weight_mask: Optional[torch.Tensor]
+
     def __init__(self,
                  input_dim: int,
                  hidden_dim: int,

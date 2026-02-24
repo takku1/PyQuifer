@@ -16,7 +16,7 @@ References:
 - Fedus et al. (2022). Switch Transformers: Scaling to Trillion Parameter Models.
 """
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -186,7 +186,7 @@ class OscillatorRouter(nn.Module):
         self,
         x: torch.Tensor,
         oscillator_state: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """Compute routing decisions.
 
         Args:

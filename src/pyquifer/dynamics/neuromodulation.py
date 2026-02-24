@@ -51,6 +51,9 @@ class NeuromodulatorDynamics(nn.Module):
     - Cross-modulator interactions
     """
 
+    tau: torch.Tensor
+    levels: torch.Tensor
+
     def __init__(self,
                  dt: float = 0.01,
                  dopamine_tau: float = 0.5,
@@ -180,6 +183,9 @@ class GlialLayer(nn.Module):
     - Creates persistent state without RNNs
     - Implements slow calcium-wave-like diffusion
     """
+
+    activation: torch.Tensor
+    kernel: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -357,6 +363,8 @@ class InjectionLocking(nn.Module):
     to the external signal. This enables context injection as
     frequency nudges rather than explicit conditioning.
     """
+
+    phases: torch.Tensor
 
     def __init__(self,
                  num_oscillators: int,

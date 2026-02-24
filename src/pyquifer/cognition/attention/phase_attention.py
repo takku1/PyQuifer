@@ -37,6 +37,8 @@ class PhaseAttention(nn.Module):
     - Weakly coupled tokens remain desynchronized (low attention)
     """
 
+    last_coherence: torch.Tensor
+
     def __init__(self,
                  d_model: int,
                  n_heads: int = 1,
@@ -384,6 +386,8 @@ class OscillatorGatedFFN(nn.Module):
     Tokens synchronized with the global rhythm pass through;
     desynchronized tokens are suppressed.
     """
+
+    phase: torch.Tensor
 
     def __init__(self,
                  d_model: int,

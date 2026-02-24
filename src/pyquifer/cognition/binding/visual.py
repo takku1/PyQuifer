@@ -169,7 +169,7 @@ class AKOrNLayer(nn.Module):
         # Conditioning bias normalization
         if c_norm == "gn":
             # GroupNorm with groups matching oscillator groups
-            self.c_norm = nn.GroupNorm(self.num_groups, dim, affine=True)
+            self.c_norm: nn.Module = nn.GroupNorm(self.num_groups, dim, affine=True)
         elif c_norm == "none" or c_norm is None:
             self.c_norm = nn.Identity()
         else:
@@ -378,7 +378,7 @@ class AKOrNBlock(nn.Module):
         dim: int,
         n: int = 4,
         num_heads: int = 4,
-        ff_dim: int = None,
+        ff_dim: Optional[int] = None,
         gamma: float = 1.0,
         num_steps: int = 5,
         dropout: float = 0.1,
@@ -459,7 +459,7 @@ class AKOrNEncoder(nn.Module):
         depth: int = 4,
         n: int = 4,
         num_heads: int = 4,
-        ff_dim: int = None,
+        ff_dim: Optional[int] = None,
         gamma: float = 1.0,
         num_steps: int = 5,
         max_tokens: Optional[int] = None,
@@ -577,7 +577,7 @@ class OscillatorySegmenter(nn.Module):
             coupling_mode=coupling_mode,
         )
 
-    def _extract_mean_phase(self, x: torch.Tensor) -> torch.Tensor:
+    def _extract_mean_phase(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute mean phase per token by running AKOrN dynamics.
 
         For vector-valued Kuramoto, we extract a scalar phase per token by
@@ -684,7 +684,7 @@ class OscillatorySegmenter(nn.Module):
             n_seg = num_segments[b].item()
             if n_seg == 0:
                 continue
-            for s in range(n_seg):
+            for s in range(int(n_seg)):
                 member_mask = (segment_ids[b] == s)
                 if member_mask.sum() < 2:
                     coherence_sum[b] += 1.0  # Single-token cluster is trivially coherent

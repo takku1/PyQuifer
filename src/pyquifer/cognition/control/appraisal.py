@@ -18,7 +18,7 @@ References:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -132,7 +132,7 @@ class AppraisalChain(nn.Module):
         # Context integration: previous appraisals influence later ones
         self.context_proj = nn.Linear(len(dimensions), dim)
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Dict[str, Any]:
         """Run sequential appraisal.
 
         Args:

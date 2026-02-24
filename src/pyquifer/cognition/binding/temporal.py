@@ -208,8 +208,8 @@ class PhaseGrouping(nn.Module):
 
         # Greedy clustering per batch
         for b in range(B):
-            centroids = []
-            counts = []
+            centroids: List[torch.Tensor] = []
+            counts: List[int] = []
             for t in range(T):
                 phi = phases[b, t]
                 assigned = False
@@ -243,7 +243,7 @@ class PhaseGrouping(nn.Module):
             num_groups[b] = len(centroids)
 
             # Pool features per group
-            for g in range(len(centroids)):
+            for g in range(int(len(centroids))):
                 mask = (group_ids[b] == g)
                 if mask.any():
                     group_features[b, g] = features[b][mask].mean(dim=0)
@@ -252,7 +252,7 @@ class PhaseGrouping(nn.Module):
         coherence = torch.zeros(B, device=device)
         for b in range(B):
             cos_sum = 0.0
-            for g in range(num_groups[b].item()):
+            for g in range(int(num_groups[b].item())):
                 mask = (group_ids[b] == g)
                 if mask.sum() > 1:
                     g_phases = phases[b][mask]

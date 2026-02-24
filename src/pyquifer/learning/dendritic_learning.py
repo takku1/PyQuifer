@@ -97,6 +97,8 @@ class PyramidalNeuron(nn.Module):
         burst_threshold: Threshold for burst-dependent plasticity.
     """
 
+    _burst_rate: torch.Tensor
+
     def __init__(
         self,
         basal_dim: int,

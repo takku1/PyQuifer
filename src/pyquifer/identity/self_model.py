@@ -41,6 +41,10 @@ class MarkovBlanket(nn.Module):
     Internal and external are conditionally independent given the blanket.
     """
 
+    internal_state: torch.Tensor
+    sensory_flow: torch.Tensor
+    active_flow: torch.Tensor
+
     def __init__(self,
                  internal_dim: int,
                  sensory_dim: int,
@@ -133,6 +137,9 @@ class SelfModel(nn.Module):
     - Includes components from body (somatic), personality (attractor),
       and capabilities (metacognitive)
     """
+
+    self_state: torch.Tensor
+    prediction_error_ema: torch.Tensor
 
     def __init__(self,
                  self_dim: int,
@@ -260,6 +267,13 @@ class NarrativeIdentity(nn.Module):
 
     narrative = (1 - tau) * narrative + tau * current_self_summary
     """
+
+    narrative: torch.Tensor
+    narrative_velocity: torch.Tensor
+    identity_strength: torch.Tensor
+    identity_fast: torch.Tensor
+    identity_slow: torch.Tensor
+    tonic_drift: torch.Tensor
 
     def __init__(self,
                  dim: int,

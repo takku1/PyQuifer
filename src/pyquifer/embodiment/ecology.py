@@ -51,6 +51,13 @@ class ChronobiologicalSystem(nn.Module):
     These modulate the system's temperature, plasticity, and processing mode.
     """
 
+    fast_phase: torch.Tensor
+    neural_phase: torch.Tensor
+    ultradian_phase: torch.Tensor
+    circadian_phase: torch.Tensor
+    glacial_phase: torch.Tensor
+    time: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  base_time_unit: float = 0.001,  # 1ms
@@ -208,6 +215,14 @@ class ImmunologicalLayer(nn.Module):
     temperature/noise) to disrupt them.
     """
 
+    self_patterns: torch.Tensor
+    pattern_ptr: torch.Tensor
+    memory_filled: torch.Tensor
+    self_mean: torch.Tensor
+    self_var: torch.Tensor
+    n_samples: torch.Tensor
+    fever_level: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  memory_size: int = 100,
@@ -346,6 +361,12 @@ class SynapticHomeostasis(nn.Module):
     (synaptic homeostasis), maintaining criticality. Dreaming
     involves reverse replay to consolidate important patterns.
     """
+
+    activation_trace: torch.Tensor
+    is_sleeping: torch.Tensor
+    sleep_progress: torch.Tensor
+    dream_buffer: torch.Tensor
+    dream_ptr: torch.Tensor
 
     def __init__(self,
                  dim: int,
@@ -490,6 +511,8 @@ class Umwelt(nn.Module):
     It lives in Fourier space, not pixel space.
     """
 
+    blind_frequencies: torch.Tensor
+
     def __init__(self,
                  input_dim: int,
                  perception_dim: int,
@@ -593,6 +616,11 @@ class AgencyMaintenance(nn.Module):
     This module tracks the system's distance from equilibrium and
     the "effort" required to maintain coherence.
     """
+
+    state: torch.Tensor
+    energy: torch.Tensor
+    coherence: torch.Tensor
+    internal_entropy: torch.Tensor
 
     def __init__(self,
                  dim: int,

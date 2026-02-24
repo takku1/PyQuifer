@@ -486,13 +486,13 @@ class ActiveInferenceAgent(nn.Module):
                 efe_result = self.efe(next_mean, next_logvar, self.decoder)
                 efes.append(efe_result['efe'])
 
-            efes = torch.stack(efes, dim=1)  # [B, A]
+            efes_t = torch.stack(efes, dim=1)  # [B, A]
 
             # Select action with minimum EFE
-            action_idx = efes.argmin(dim=1)
+            action_idx = efes_t.argmin(dim=1)
             action = F.one_hot(action_idx, self.action_dim).float()
 
-            return action, {'efes': efes, 'selected': action_idx}
+            return action, {'efes': efes_t, 'selected': action_idx}
 
         else:
             # Use policy network

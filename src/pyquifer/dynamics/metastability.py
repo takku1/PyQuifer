@@ -38,6 +38,10 @@ class WinnerlessCompetition(nn.Module):
     The system dwells near each saddle before transitioning to the next.
     """
 
+    activations: torch.Tensor
+    rho: torch.Tensor
+    step_count: torch.Tensor
+
     def __init__(self,
                  num_populations: int = 6,
                  sigma: float = 1.0,
@@ -136,6 +140,12 @@ class HeteroclinicChannel(nn.Module):
     Records which state is dominant, how long it dwells there,
     and the transition pattern — this IS the stream of consciousness.
     """
+
+    current_dominant: torch.Tensor
+    current_dwell: torch.Tensor
+    dwell_times: torch.Tensor
+    dwell_counts: torch.Tensor
+    transition_counts: torch.Tensor
 
     def __init__(self,
                  num_states: int = 6,
@@ -243,6 +253,9 @@ class MetastabilityIndex(nn.Module):
     - Coalition entropy: diversity of active state combinations
     - Chimera index: coexistence of synchronized and desynchronized groups
     """
+
+    activation_history: torch.Tensor
+    history_ptr: torch.Tensor
 
     def __init__(self,
                  num_populations: int = 6,

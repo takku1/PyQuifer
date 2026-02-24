@@ -33,6 +33,15 @@ class EpisodicBuffer(nn.Module):
     memories are protected from overwrite via priority.
     """
 
+    states: torch.Tensor
+    rewards: torch.Tensor
+    contexts: torch.Tensor
+    timestamps: torch.Tensor
+    replay_counts: torch.Tensor
+    write_ptr: torch.Tensor
+    num_stored: torch.Tensor
+    global_step: torch.Tensor
+
     def __init__(self,
                  state_dim: int,
                  context_dim: int = 0,
@@ -176,6 +185,9 @@ class SharpWaveRipple(nn.Module):
     Models hippocampal sharp-wave ripples during slow-wave sleep.
     """
 
+    last_replay: torch.Tensor
+    replay_count: torch.Tensor
+
     def __init__(self,
                  state_dim: int,
                  replay_burst_size: int = 10,
@@ -254,6 +266,11 @@ class ConsolidationEngine(nn.Module):
     Noise during replay creates generalization (the dream doesn't match
     the memory exactly, so the semantic trace captures the GIST).
     """
+
+    semantic_traces: torch.Tensor
+    trace_strengths: torch.Tensor
+    trace_ptr: torch.Tensor
+    num_traces: torch.Tensor
 
     def __init__(self,
                  state_dim: int,
@@ -468,6 +485,8 @@ class SleepReplayConsolidation(nn.Module):
 
     Ref: Tadros et al. (2022), Nature Communications.
     """
+
+    total_sleep_steps: torch.Tensor
 
     def __init__(self, layer_dims: List[int], sleep_lr: float = 0.001,
                  noise_scale: float = 1.0, num_replay_steps: int = 100):

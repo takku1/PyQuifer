@@ -31,6 +31,10 @@ class NoProgressDetector(nn.Module):
         progress_threshold: Slope below this magnitude counts as stalled
     """
 
+    history: torch.Tensor
+    hist_ptr: torch.Tensor
+    stagnation_count: torch.Tensor
+
     def __init__(self, window_size: int = 30, progress_threshold: float = 0.01):
         super().__init__()
         self.window_size = window_size
@@ -127,6 +131,12 @@ class CriticalityController(nn.Module):
 
     This is a meta-level controller for PyQuifer's dynamics.
     """
+
+    coupling_adjustment: torch.Tensor
+    noise_adjustment: torch.Tensor
+    integral_error: torch.Tensor
+    sigma_history: torch.Tensor
+    sigma_ptr: torch.Tensor
 
     def __init__(self,
                  target_branching_ratio: float = 1.0,
@@ -274,6 +284,10 @@ class HomeostaticRegulator(nn.Module):
 
     Works alongside criticality control to ensure stability.
     """
+
+    running_activity: torch.Tensor
+    scaling: torch.Tensor
+    threshold_offset: torch.Tensor
 
     def __init__(self,
                  target_activity: float = 0.5,

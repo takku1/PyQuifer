@@ -52,6 +52,10 @@ class EchoStateNetwork(nn.Module):
         - W is scaled to target spectral radius
     """
 
+    W_in: torch.Tensor
+    W: torch.Tensor
+    bias: torch.Tensor
+
     def __init__(self,
                  input_dim: int,
                  reservoir_dim: int,
@@ -289,6 +293,9 @@ class ReservoirWithIP(nn.Module):
     neuron nonlinearities for improved performance.
     """
 
+    W_in: torch.Tensor
+    W: torch.Tensor
+
     def __init__(self,
                  input_dim: int,
                  reservoir_dim: int,
@@ -402,6 +409,8 @@ class CriticalReservoir(nn.Module):
     - Langton, C. (1990). Computation at the edge of chaos.
     - Bertschinger, N. & Natschläger, T. (2004). Real-time computation at the edge of chaos.
     """
+
+    W_base: torch.Tensor
 
     def __init__(self,
                  input_dim: int,

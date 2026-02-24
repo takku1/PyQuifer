@@ -177,6 +177,9 @@ class SimulatedAnnealing(nn.Module):
     Good for finding global optima in oscillator configurations.
     """
 
+    best_state: torch.Tensor
+    best_energy: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  initial_temp: float = 10.0,
@@ -411,6 +414,9 @@ class ThermodynamicOscillatorSystem(nn.Module):
     The system can "freeze" into synchronized states or
     "melt" into disordered states based on temperature.
     """
+
+    phases: torch.Tensor
+    frequencies: torch.Tensor
 
     def __init__(self,
                  num_oscillators: int,

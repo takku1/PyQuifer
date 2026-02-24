@@ -61,6 +61,8 @@ class PhaseLockBus(nn.Module):
         config: BusConfig with modality dimensions and coupling parameters.
     """
 
+    _coherence_ema: torch.Tensor
+
     def __init__(self, config: BusConfig):
         super().__init__()
         self.config = config

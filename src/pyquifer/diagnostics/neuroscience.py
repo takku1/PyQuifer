@@ -350,7 +350,7 @@ def complexity_entropy(signal: Tensor, m: int = 5) -> Tuple[float, float]:
 
     # Count ordinal patterns
     signal_list = signal.tolist()
-    pattern_counts = {}
+    pattern_counts: Dict[Tuple[int, ...], int] = {}
     n_windows = T - m + 1
 
     for i in range(n_windows):

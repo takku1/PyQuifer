@@ -42,6 +42,9 @@ class SpikingPCNeuron(nn.Module):
         tau_syn: Synaptic time constant.
     """
 
+    membrane: torch.Tensor
+    synaptic: torch.Tensor
+
     def __init__(
         self,
         dim: int,
@@ -235,6 +238,9 @@ class MultiCompartmentSpikingPC(nn.Module):
         threshold: Spike threshold.
         tau_mem: Membrane time constant.
     """
+
+    compartment_voltages: torch.Tensor
+    soma_voltage: torch.Tensor
 
     def __init__(
         self,

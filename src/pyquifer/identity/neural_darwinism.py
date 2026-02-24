@@ -48,6 +48,10 @@ class NeuronalGroup(nn.Module):
     thrive; low-fitness groups atrophy (slowly — not instant death).
     """
 
+    fitness: torch.Tensor
+    resources: torch.Tensor
+    activation_level: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  group_id: int = 0):
@@ -106,6 +110,8 @@ class SelectionArena(nn.Module):
     2. Experiential: fitness-based selection (replicator equation)
     3. Reentrant: cross-group signaling forms functional maps
     """
+
+    step_count: torch.Tensor
 
     def __init__(self,
                  num_groups: int,
@@ -383,6 +389,10 @@ class SymbiogenesisDetector(nn.Module):
     organisms that became symbiotically integrated.
     """
 
+    history: torch.Tensor
+    hist_ptr: torch.Tensor
+    bonds: torch.Tensor
+
     def __init__(self,
                  num_groups: int,
                  group_dim: int,
@@ -552,6 +562,11 @@ class SpeciatedSelectionArena(nn.Module):
         compatibility_threshold: Distance threshold for same-species
         stagnation_limit: Steps without improvement before species elimination
     """
+
+    species_ids: torch.Tensor
+    species_best_fitness: torch.Tensor
+    species_stagnation: torch.Tensor
+    step_count: torch.Tensor
 
     def __init__(self,
                  num_groups: int,

@@ -42,6 +42,15 @@ class VolatilityNode(nn.Module):
     in a HierarchicalVolatilityFilter for multi-timescale adaptation.
     """
 
+    mean: torch.Tensor
+    precision: torch.Tensor
+    predicted_mean: torch.Tensor
+    predicted_precision: torch.Tensor
+    value_pe: torch.Tensor
+    volatility_pe: torch.Tensor
+    effective_precision: torch.Tensor
+    step_count: torch.Tensor
+
     def __init__(self,
                  dim: int,
                  tonic_volatility: float = -4.0,
