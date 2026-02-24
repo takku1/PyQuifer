@@ -1,3 +1,4 @@
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -8,6 +9,12 @@ class PerlinNoise(nn.Module):
     Pure PyTorch implementation of Perlin noise (GPU-compatible, differentiable).
     Supports 2D, 3D, and 4D noise generation.
     """
+
+    # Buffer type annotations
+    perm: torch.Tensor
+    grad2: torch.Tensor
+    grad3: torch.Tensor
+    grad4: torch.Tensor
 
     def __init__(self, seed: int = 0):
         super().__init__()
@@ -220,8 +227,10 @@ class PerturbationLayer(nn.Module):
     Supports 2D, 3D, and 4D noise with fractal octaves (fBm).
     """
 
+    noise: Optional[PerlinNoise]
+
     def __init__(self, dim: int, scale: float = 10.0, octaves: int = 6,
-                 persistence: float = 0.5, lacunarity: float = 2.0, seed: int = None):
+                 persistence: float = 0.5, lacunarity: float = 2.0, seed: Optional[int] = None):
         super().__init__()
         if dim < 2:
             raise ValueError("PerturbationLayer requires at least 2 dimensions.")

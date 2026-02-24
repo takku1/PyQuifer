@@ -139,6 +139,11 @@ class HippocampalModule(nn.Module):
         separation_factor: Controls pattern separation strength.
     """
 
+    # Buffer type annotations
+    memories: torch.Tensor
+    memory_mask: torch.Tensor
+    num_stored: torch.Tensor
+
     def __init__(self, dim: int, capacity: int = 1000, separation_factor: float = 1.0):
         super().__init__()
         self.dim = dim
@@ -292,6 +297,11 @@ class NeocorticalModule(nn.Module):
         num_schemas: Number of schema slots.
         lr: Learning rate for schema updates.
     """
+
+    # Buffer type annotations
+    schemas: torch.Tensor
+    schema_usage: torch.Tensor
+    num_active: torch.Tensor
 
     def __init__(self, dim: int, schema_dim: int = 32, num_schemas: int = 50, lr: float = 0.01):
         super().__init__()

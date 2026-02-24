@@ -39,6 +39,10 @@ class TsodyksMarkramSynapse(nn.Module):
         dt: Integration timestep
     """
 
+    # Buffer type annotations (register_buffer → mypy infers Tensor | Module without these)
+    u: torch.Tensor
+    x: torch.Tensor
+
     def __init__(self,
                  num_synapses: int,
                  U: float = 0.2,

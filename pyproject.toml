@@ -67,6 +67,7 @@ include = ["pyquifer*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-p no:opik -p no:randomly"
 
 [tool.ruff]
 line-length = 100

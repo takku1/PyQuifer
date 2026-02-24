@@ -78,6 +78,9 @@ class StandingBroadcast(nn.Module):
         momentum: How fast old broadcasts decay (higher = more persistent)
     """
 
+    # Buffer type annotation
+    content: torch.Tensor
+
     def __init__(self, dim: int, momentum: float = 0.9):
         super().__init__()
         self.momentum = momentum

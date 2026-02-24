@@ -1,5 +1,6 @@
 """Criticality feedback loop for torch.compile."""
 import math
+from typing import Optional
 
 import torch
 
@@ -9,9 +10,9 @@ def _criticality_feedback(
     osc_coupling_data: torch.Tensor,
     crit_sigma: torch.Tensor,
     R_current: torch.Tensor,
-    dephasing_gain: torch.Tensor = None,
-    R_target: torch.Tensor = None,
-    colored_noise: torch.Tensor = None,
+    dephasing_gain: Optional[torch.Tensor] = None,
+    R_target: Optional[torch.Tensor] = None,
+    colored_noise: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Pure-tensor criticality feedback loop (slow + fast paths).
 

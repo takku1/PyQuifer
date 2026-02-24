@@ -127,6 +127,10 @@ class IgnitionDynamics(nn.Module):
     At low temperature, becomes sharp threshold (step function).
     """
 
+    # Buffer type annotations
+    last_ignition: torch.Tensor
+    ignition_count: torch.Tensor
+
     def __init__(self,
                  threshold: float = 0.5,
                  temperature: float = 0.1,
@@ -275,6 +279,11 @@ class PrecisionWeighting(nn.Module):
 
     Implements optimal Bayesian precision estimation.
     """
+
+    # Buffer type annotations
+    error_mean: torch.Tensor
+    error_var: torch.Tensor
+    n_samples: torch.Tensor
 
     def __init__(self,
                  dim: int,

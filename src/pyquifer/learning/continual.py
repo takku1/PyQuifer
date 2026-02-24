@@ -688,6 +688,11 @@ class ContinualLearner(nn.Module):
     to any PyTorch model.
     """
 
+    ewc: Optional['ElasticWeightConsolidation']
+    si: Optional['SynapticIntelligence']
+    replay: Optional['ExperienceReplay']
+    mesu: Optional['MESU']
+
     def __init__(self,
                  model: nn.Module,
                  strategy: str = 'ewc',

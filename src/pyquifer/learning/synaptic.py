@@ -15,7 +15,7 @@ Based on work by Hebb, Gerstner, Sutton, Friston.
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,11 @@ class EligibilityTrace(nn.Module):
 
     The trace decays exponentially, creating a temporal credit window.
     """
+
+    # Buffer type annotations (register_buffer → mypy infers Tensor | Module without these)
+    trace: torch.Tensor
+    trace_pos: torch.Tensor
+    trace_neg: torch.Tensor
 
     def __init__(self,
                  shape: Tuple[int, ...],
@@ -119,6 +124,10 @@ class RewardModulatedHebbian(nn.Module):
 
     Can use PyQuifer's intrinsic motivation signals as reward.
     """
+
+    # Buffer type annotations
+    last_input: torch.Tensor
+    last_output: torch.Tensor
 
     def __init__(self,
                  input_dim: int,
@@ -422,7 +431,7 @@ class PredictiveCoding(nn.Module):
             if i < len(errors):
                 # Predictor[i-1] predicts layer i-1 from layer i
                 # Error propagates back through predictor weights
-                grad = grad + torch.matmul(errors[i - 1], self.predictors[i - 1].weight)
+                grad = grad + torch.matmul(errors[i - 1], cast(nn.Linear, self.predictors[i - 1]).weight)
 
             new_state = states[i] - step_size * grad
             new_state = torch.clamp(new_state, -10.0, 10.0)  # Prevent explosion
@@ -458,7 +467,7 @@ class PredictiveCoding(nn.Module):
         # Compute final free energy
         predictions = self.predict(states)
         errors = self.compute_errors(states, predictions)
-        free_energy = sum(e.pow(2).sum() for e in errors)
+        free_energy: torch.Tensor = torch.stack([e.pow(2).sum() for e in errors]).sum()
 
         return states, free_energy
 
@@ -497,7 +506,7 @@ class PredictiveCoding(nn.Module):
         return {
             'free_energy': free_energy,
             'top_state': states[-1],
-            'errors': [e.pow(2).mean() for e in errors]
+            'errors': torch.stack([e.pow(2).mean() for e in errors])
         }
 
 
@@ -524,6 +533,9 @@ class DifferentiablePlasticity(nn.Module):
         eta_init: Initial Hebbian learning rate
         alpha_init: Initial plasticity influence
     """
+
+    # Buffer type annotation
+    H: torch.Tensor
 
     def __init__(self,
                  input_dim: int,
@@ -589,6 +601,9 @@ class LearnableEligibilityTrace(nn.Module):
         accumulation_rate: How fast new activity accumulates
         learnable: If True, decay_rate is an nn.Parameter
     """
+
+    # Buffer type annotation
+    trace: torch.Tensor
 
     def __init__(self,
                  shape: Tuple[int, ...],
@@ -669,6 +684,10 @@ class OscillationGatedPlasticity(nn.Module):
     - Huerta & Lisman (1995). Theta-phase gating of LTP/LTD.
     - Hasselmo et al. (2002). Theta rhythm and memory encoding.
     """
+
+    # Buffer type annotations
+    trace: torch.Tensor
+    gate_value: torch.Tensor
 
     def __init__(self, shape: Tuple[int, ...], preferred_phase: float = math.pi,
                  decay_rate: float = 0.95, accumulation_rate: float = 0.1):
@@ -762,6 +781,10 @@ class ThreeFactorRule(nn.Module):
     - Gerstner et al. (2018). Eligibility Traces and Plasticity on Behavioral Timescales.
     - Frémaux & Gerstner (2016). Neuromodulated STDP and Theory of Three-Factor Learning.
     """
+
+    # Buffer type annotations
+    trace: torch.Tensor
+    running_rate: torch.Tensor
 
     def __init__(self, input_dim: int, output_dim: int,
                  trace_decay: float = 0.95, homeostatic_target: float = 0.1,

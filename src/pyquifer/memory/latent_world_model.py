@@ -111,6 +111,8 @@ class StochasticStateModel(nn.Module):
     Uses diagonal Gaussian parameterization.
     """
 
+    posterior_net: Optional[nn.Sequential]
+
     def __init__(self,
                  hidden_dim: int,
                  stoch_dim: int,
@@ -627,10 +629,10 @@ class WorldModel(nn.Module):
         priors, posteriors = self.observe(obs_seq, action_seq)
 
         # Reconstruction loss
-        recon_loss = 0.0
-        reward_loss = 0.0
-        continue_loss = 0.0
-        kl_loss = 0.0
+        recon_loss: torch.Tensor = torch.tensor(0.0)
+        reward_loss: torch.Tensor = torch.tensor(0.0)
+        continue_loss: torch.Tensor = torch.tensor(0.0)
+        kl_loss: torch.Tensor = torch.tensor(0.0)
 
         for t, post in enumerate(posteriors):
             state = post.combined

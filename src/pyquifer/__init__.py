@@ -861,7 +861,7 @@ _LAZY_IMPORTS = {
 }
 
 # Cache for loaded attributes
-_loaded = {}
+_loaded: dict[str, object] = {}
 
 
 def __getattr__(name: str):

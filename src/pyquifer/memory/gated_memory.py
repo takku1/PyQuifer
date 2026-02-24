@@ -98,6 +98,10 @@ class DifferentiableMemoryBank(nn.Module):
         num_heads: Number of attention heads for reading.
     """
 
+    # Buffer type annotations
+    memory: torch.Tensor
+    usage: torch.Tensor
+
     def __init__(self, num_slots: int = 128, slot_dim: int = 64, num_heads: int = 4):
         super().__init__()
         self.num_slots = num_slots
@@ -234,6 +238,9 @@ class MemoryConsolidationLoop(nn.Module):
         replay_noise: Noise added during replay (generalization).
         theta_frequency: Theta oscillation frequency (Hz).
     """
+
+    # Buffer type annotation
+    _theta_phase: torch.Tensor
 
     def __init__(
         self,
