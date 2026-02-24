@@ -72,7 +72,7 @@ class MarkovBlanket(nn.Module):
 
     def forward(self,
                 sensory_input: torch.Tensor,
-                external_state: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                _external_state: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         """
         Process through the Markov blanket.
 

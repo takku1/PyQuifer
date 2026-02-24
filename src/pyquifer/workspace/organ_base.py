@@ -112,7 +112,7 @@ class Organ(nn.Module, ABC):
         ...
 
     @abstractmethod
-    def propose(self, gw_state: Optional[torch.Tensor] = None) -> Proposal:
+    def propose(self, _gw_state: Optional[torch.Tensor] = None) -> Proposal:
         """Generate a proposal for workspace competition."""
         ...
 
@@ -250,7 +250,7 @@ class HPCOrgan(Organ):
         with torch.no_grad():
             self._latent.copy_(self._last_result['errors'][0].squeeze(0)[:self.latent_dim].detach())
 
-    def propose(self, gw_state: Optional[torch.Tensor] = None) -> Proposal:
+    def propose(self, _gw_state: Optional[torch.Tensor] = None) -> Proposal:
         if self._last_result is None:
             return Proposal(
                 content=self._latent,
@@ -311,7 +311,7 @@ class MotivationOrgan(Organ):
         with torch.no_grad():
             self._latent.copy_(inp.detach())
 
-    def propose(self, gw_state: Optional[torch.Tensor] = None) -> Proposal:
+    def propose(self, _gw_state: Optional[torch.Tensor] = None) -> Proposal:
         if self._last_result is None:
             return Proposal(content=self._latent, salience=0.0,
                             tags={"motivation"}, organ_id=self.organ_id)
@@ -362,7 +362,7 @@ class SelectionOrgan(Organ):
             else:
                 self._latent[:best_group.shape[-1]].copy_(best_group.detach())
 
-    def propose(self, gw_state: Optional[torch.Tensor] = None) -> Proposal:
+    def propose(self, _gw_state: Optional[torch.Tensor] = None) -> Proposal:
         if self._last_result is None:
             return Proposal(content=self._latent, salience=0.0,
                             tags={"selection"}, organ_id=self.organ_id)

@@ -132,7 +132,7 @@ class MCPOrgan(Organ):
         if global_broadcast is not None:
             self.update_standing(global_broadcast)
 
-    def propose(self, gw_state: Optional[torch.Tensor] = None) -> Proposal:
+    def propose(self, _gw_state: Optional[torch.Tensor] = None) -> Proposal:
         """Compute salience from state change magnitude + staleness.
 
         Salience formula:

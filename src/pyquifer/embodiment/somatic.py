@@ -119,7 +119,7 @@ class HardwareSensor:
         # Update expected latency (slow adaptation)
         self.expected_latency_ms = 0.95 * self.expected_latency_ms + 0.05 * latency_ms
 
-    def record_error(self, error_type: str = "generic"):
+    def record_error(self, _error_type: str = "generic"):
         """Record an error occurrence."""
         self.error_history.append(time.time())
 
@@ -264,7 +264,7 @@ class SomaticManifold(nn.Module):
         modulation = self.potential_to_coupling(potential.unsqueeze(0))
         return modulation.squeeze(0)
 
-    def predict_future_stress(self, steps_ahead: int = 10) -> torch.Tensor:
+    def predict_future_stress(self, _steps_ahead: int = 10) -> torch.Tensor:
         """
         Predict future stress (allostatic anticipation).
 

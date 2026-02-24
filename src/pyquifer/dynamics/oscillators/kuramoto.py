@@ -949,13 +949,13 @@ class SensoryCoupling(nn.Module):
     def forward(
         self,
         sensory_input: torch.Tensor,
-        current_phases: torch.Tensor,
+        _current_phases: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """Compute coupling signals from sensory input.
 
         Args:
             sensory_input: (state_dim,) or (1, state_dim) sensory vector
-            current_phases: (num_oscillators,) current oscillator phases
+            _current_phases: (num_oscillators,) current oscillator phases (unused; coupling computed from sensory)
 
         Returns:
             Dict with:

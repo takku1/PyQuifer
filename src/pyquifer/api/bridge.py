@@ -576,7 +576,7 @@ class PyQuiferBridge(nn.Module):
     def modulate_hidden(self,
                         hidden_states: torch.Tensor,
                         state: ModulationState,
-                        layer_idx: int = -1) -> torch.Tensor:
+                        _layer_idx: int = -1) -> torch.Tensor:
         """
         Level 3: Inject oscillator state into transformer hidden states.
 
@@ -863,11 +863,11 @@ class PyQuiferLogitsProcessor:
         self._stepper = stepper
         self._sensory = sensory
 
-    def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+    def __call__(self, _input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
         """Apply bridge modulation to scores (logits).
 
         Args:
-            input_ids: (batch, seq_len) — generated tokens so far.
+            _input_ids: (batch, seq_len) — generated tokens so far (unused; required by HF interface).
             scores: (batch, vocab_size) — logits for next token.
 
         Returns:

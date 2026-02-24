@@ -175,6 +175,10 @@ class TestRegimeDiscrimination:
 
     @pytest.fixture(autouse=True)
     def setup(self):
+        # Fixed seed for deterministic R trajectories; the criticality controller
+        # partially equalizes sync/noisy over 200 warmup ticks, so the discrimination
+        # margin is small (~0.03) and depends on the noise sequence.
+        torch.manual_seed(0)
         wake_cycle = _make_cycle_regime('wake')
         sync_cycle = _make_cycle_regime('sync')
         noisy_cycle = _make_cycle_regime('noisy')

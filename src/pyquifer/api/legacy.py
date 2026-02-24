@@ -221,7 +221,7 @@ class PyQuifer(nn.Module):
         logger.info(f"Viscosity Control: Adjusted actualization_strength to {new_actualization_strength:.4f} "
               f"based on data variance ({data_variance:.4f}).")
 
-    def ingest_data(self, data, feature_mapping: Optional[Dict[str, str]] = None):
+    def ingest_data(self, data, _feature_mapping: Optional[Dict[str, str]] = None):
         """
         Ingests raw data into the PyQuifer system. This method now utilizes the 'Automated Sieve'
         for preparing the data and triggers 'Viscosity Control'.
