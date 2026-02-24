@@ -629,13 +629,15 @@ class LearnableKuramotoBank(nn.Module):
 
         # ── Fused order parameter: reuse final phases, avoid redundant sin/cos ──
         # R*e^(iPsi) = (1/N) * sum(e^(i*theta))
+        # No grad needed — R is a monitoring metric, not a training signal.
         _N = float(self.num_oscillators)
-        _sin_final = torch.sin(phases)
-        _cos_final = torch.cos(phases)
-        _mean_sin = _sin_final.sum() / _N
-        _mean_cos = _cos_final.sum() / _N
-        self._cached_R = torch.sqrt(_mean_sin * _mean_sin + _mean_cos * _mean_cos)
-        self._cached_Psi = torch.atan2(_mean_sin, _mean_cos)
+        with torch.no_grad():
+            _sin_final = torch.sin(phases)
+            _cos_final = torch.cos(phases)
+            _mean_sin = _sin_final.sum() / _N
+            _mean_cos = _cos_final.sum() / _N
+            self._cached_R = torch.sqrt(_mean_sin * _mean_sin + _mean_cos * _mean_cos)
+            self._cached_Psi = torch.atan2(_mean_sin, _mean_cos)
 
         # Update precision from phase velocity variance
         with torch.no_grad():

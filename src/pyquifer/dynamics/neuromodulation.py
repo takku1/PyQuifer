@@ -110,39 +110,41 @@ class NeuromodulatorDynamics(nn.Module):
         Returns:
             Current neuromodulator state
         """
-        # Phasic inputs
-        phasic = torch.tensor([
-            reward_signal + 0.5 * novelty_signal,  # DA: reward + novelty
-            success_signal - 0.5 * threat_signal,   # 5HT: success, reduced by threat
-            novelty_signal + threat_signal,         # NE: arousal from novelty or threat
-            novelty_signal * (1 - threat_signal),   # ACh: learning when novel but safe
-            threat_signal - 0.3 * success_signal,   # Cort: stress, reduced by success
-        ], device=self.levels.device)
+        # Pure state update — no gradient tracking needed
+        with torch.no_grad():
+            # Phasic inputs
+            phasic = torch.tensor([
+                reward_signal + 0.5 * novelty_signal,  # DA: reward + novelty
+                success_signal - 0.5 * threat_signal,   # 5HT: success, reduced by threat
+                novelty_signal + threat_signal,         # NE: arousal from novelty or threat
+                novelty_signal * (1 - threat_signal),   # ACh: learning when novel but safe
+                threat_signal - 0.3 * success_signal,   # Cort: stress, reduced by success
+            ], device=self.levels.device)
 
-        # Cross-modulator effects
-        cross_effect = self.interaction @ self.levels
+            # Cross-modulator effects
+            cross_effect = self.interaction @ self.levels
 
-        # Phasic gain diminishes as levels approach saturation (0 or 1).
-        # This prevents persistent mild signals from saturating all channels.
-        # headroom = distance to ceiling (for positive phasic) or floor (for negative)
-        headroom = torch.where(
-            phasic > 0,
-            1.0 - self.levels,  # room to grow
-            self.levels,        # room to shrink
-        )
-        scaled_phasic = phasic * 0.1 * headroom
+            # Phasic gain diminishes as levels approach saturation (0 or 1).
+            # This prevents persistent mild signals from saturating all channels.
+            # headroom = distance to ceiling (for positive phasic) or floor (for negative)
+            headroom = torch.where(
+                phasic > 0,
+                1.0 - self.levels,  # room to grow
+                self.levels,        # room to shrink
+            )
+            scaled_phasic = phasic * 0.1 * headroom
 
-        # Exponential decay toward baseline + phasic input + cross effects
-        decay = self.dt / self.tau
-        self.levels = (
-            self.levels * (1 - decay) +
-            self.baseline * decay +
-            scaled_phasic +
-            cross_effect * 0.02
-        )
+            # Exponential decay toward baseline + phasic input + cross effects
+            decay = self.dt / self.tau
+            new_levels = (
+                self.levels * (1 - decay) +
+                self.baseline * decay +
+                scaled_phasic +
+                cross_effect * 0.02
+            )
 
-        # Clamp to valid range
-        self.levels = torch.clamp(self.levels, 0.0, 1.0)
+            # In-place update of registered buffer (preserves buffer, prevents graph accumulation)
+            self.levels.copy_(torch.clamp(new_levels, 0.0, 1.0))
 
         return NeuromodulatorState(
             dopamine=self.levels[0].item(),
@@ -218,29 +220,33 @@ class GlialLayer(nn.Module):
         if neural_activity.dim() > 1:
             neural_activity = neural_activity.mean(dim=0)
 
-        # Slow integration of neural activity
-        decay = dt / self.tau
-        self.activation = (
-            self.activation * (1 - decay) +
-            neural_activity.abs() * decay
-        )
-
-        # Spatial diffusion (calcium wave simulation)
-        if self.dim > 5:
-            # 1D convolution for local spreading
-            padded = F.pad(
-                self.activation.unsqueeze(0).unsqueeze(0),
-                (2, 2), mode='circular'
+        with torch.no_grad():
+            # Slow integration of neural activity
+            decay = dt / self.tau
+            new_activation = (
+                self.activation * (1 - decay) +
+                neural_activity.abs() * decay
             )
-            diffused = F.conv1d(
-                padded,
-                self.kernel.unsqueeze(0).unsqueeze(0)
-            ).squeeze()
 
-            self.activation = (
-                self.activation * (1 - self.diffusion_rate) +
-                diffused * self.diffusion_rate
-            )
+            # Spatial diffusion (calcium wave simulation)
+            if self.dim > 5:
+                # 1D convolution for local spreading
+                padded = F.pad(
+                    new_activation.unsqueeze(0).unsqueeze(0),
+                    (2, 2), mode='circular'
+                )
+                diffused = F.conv1d(
+                    padded,
+                    self.kernel.unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+
+                new_activation = (
+                    new_activation * (1 - self.diffusion_rate) +
+                    diffused * self.diffusion_rate
+                )
+
+            # In-place update of registered buffer
+            self.activation.copy_(new_activation)
 
         return self.activation
 
@@ -387,24 +393,27 @@ class InjectionLocking(nn.Module):
         Returns:
             Current oscillator states (cos of phases)
         """
-        if external_freq is not None:
-            # Check if within lock range
-            freq_diff = external_freq - self.natural_freq
-            rel_diff = freq_diff.abs() / self.natural_freq
+        with torch.no_grad():
+            if external_freq is not None:
+                # Check if within lock range
+                freq_diff = external_freq - self.natural_freq
+                rel_diff = freq_diff.abs() / self.natural_freq
 
-            # Lock strength based on how close we are to lock range
-            lock_strength = torch.relu(1 - rel_diff / self.lock_range)
+                # Lock strength based on how close we are to lock range
+                lock_strength = torch.relu(1 - rel_diff / self.lock_range)
 
-            # Blend natural and external frequency
-            effective_freq = (
-                self.natural_freq * (1 - lock_strength) +
-                external_freq * lock_strength
+                # Blend natural and external frequency
+                effective_freq = (
+                    self.natural_freq * (1 - lock_strength) +
+                    external_freq * lock_strength
+                )
+            else:
+                effective_freq = self.natural_freq
+
+            # In-place update of registered buffer
+            self.phases.copy_(
+                (self.phases + 2 * math.pi * effective_freq * dt) % (2 * math.pi)
             )
-        else:
-            effective_freq = self.natural_freq
-
-        # Update phases
-        self.phases = (self.phases + 2 * math.pi * effective_freq * dt) % (2 * math.pi)
 
         # Output with optional amplitude modulation
         output = torch.cos(self.phases)

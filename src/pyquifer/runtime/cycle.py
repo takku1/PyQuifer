@@ -1343,9 +1343,10 @@ class CognitiveCycle(nn.Module):
                 coherence_val=R_val_for_gw,
                 input_novelty=_nov_f,
             )
-            # Cache for bridge minimal path
+            # Cache for bridge minimal path — detach to prevent cross-tick grad accumulation
             self._cached_gw_winner_id = gw_info.get('gw_winner', '')
-            self._cached_gw_broadcast = gw_info.get('gw_broadcast')
+            _gw_bc = gw_info.get('gw_broadcast')
+            self._cached_gw_broadcast = _gw_bc.detach() if isinstance(_gw_bc, torch.Tensor) else _gw_bc
 
             # BG mode bias can override DominanceDetector
             if gw_info.get('bg_stn_active', False):
@@ -1433,11 +1434,12 @@ class CognitiveCycle(nn.Module):
             }
 
         # ── Step 9: Neural darwinism ──
-        group_input = self.state_to_group(sensory_input)
-        # Global coherence from oscillator order parameter
-        global_coherence_signal = self.state_to_group(
-            self.phase_to_state(torch.sin(phases).unsqueeze(0)).squeeze(0)
-        )
+        with torch.no_grad():
+            group_input = self.state_to_group(sensory_input)
+            # Global coherence from oscillator order parameter
+            global_coherence_signal = self.state_to_group(
+                self.phase_to_state(torch.sin(phases).unsqueeze(0)).squeeze(0)
+            )
 
         # GW → Arena wiring: blend workspace broadcast into coherence signal
         if gw_info and 'gw_broadcast' in gw_info:
@@ -1449,18 +1451,20 @@ class CognitiveCycle(nn.Module):
             global_coherence_signal = global_coherence_signal + 0.2 * gw_proj
 
         if self._tick_py % c.step_every_arena == 0 or self._cached_arena is None:
-            arena_result = self.arena(group_input, global_coherence=global_coherence_signal)
-            self.symbiogenesis(arena_result['group_outputs'])
+            with torch.no_grad():
+                arena_result = self.arena(group_input, global_coherence=global_coherence_signal)
+                self.symbiogenesis(arena_result['group_outputs'])
             self._cached_arena = arena_result
         else:
             arena_result = self._cached_arena
 
         # ── Step 10: Motivation ──
         if self._tick_py % c.step_every_motivation == 0 or self._cached_motiv is None:
-            motiv_result = self.motivation(
-                sensory_input,
-                order_parameter=coherence.detach(),
-            )
+            with torch.no_grad():
+                motiv_result = self.motivation(
+                    sensory_input,
+                    order_parameter=coherence.detach(),
+                )
             self._cached_motiv = motiv_result
         else:
             motiv_result = self._cached_motiv
