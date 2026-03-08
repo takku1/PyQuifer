@@ -164,6 +164,12 @@ class CycleConfig:
     oscillator_topology_params: Optional[Dict[str, Any]] = None  # Topology-specific params
     oscillator_frustration: float = 0.0  # Kuramoto-Sakaguchi phase-lag α (radians). π/4 promotes chimera states.
 
+    # Conformist-contrarian oscillators (Hong & Strogatz 2011, PRL 106 054102)
+    # Contrarians couple negatively to the mean field (σ_i = -1), settling at π
+    # anti-phase. Prevents full mode collapse, sustains chimera dynamics.
+    # Indices 0..num_contrarian_oscillators-1 become contrarians.
+    num_contrarian_oscillators: int = 0
+
     # True theta-gamma PAC (Fix 11: Tort MI)
     use_theta_gamma_pac: bool = False     # Partition oscillators into theta/gamma banks
     theta_oscillators: int = 8            # Number of oscillators in theta band (4-8 Hz)
@@ -210,6 +216,10 @@ class CycleConfig:
         Uses aggressive hierarchical timestepping: slow modules run
         less often, with cached results interpolated between updates.
         HPC runs with 1 iteration (bottom-up only) for speed.
+
+        Includes 2 contrarian oscillators (Hong & Strogatz 2011) and gentle
+        Kuramoto-Sakaguchi frustration (π/6) to sustain chimera dynamics
+        without the overhead of modular topology.
         """
         return CycleConfig(
             hpc_iterations=1,          # Bottom-up only (3x faster HPC)
@@ -220,6 +230,9 @@ class CycleConfig:
             step_every_precision=2,    # Precision every 2 ticks
             step_every_arena=3,        # Arena every 3 ticks
             step_every_selfmodel=5,    # Self-model every 5 ticks
+            # Contrarian oscillators: prevent full phase-lock (echo chamber)
+            num_contrarian_oscillators=2,
+            oscillator_frustration=math.pi / 6,  # π/6 — gentler than neuroscience π/4
         )
 
     @staticmethod
@@ -241,6 +254,8 @@ class CycleConfig:
             step_every_precision=3,     # Precision every 3 ticks
             step_every_arena=5,         # Arena every 5 ticks
             step_every_selfmodel=10,    # Self-model every 10 ticks
+            num_contrarian_oscillators=2,        # Anti-echo-chamber skeptic modules
+            oscillator_frustration=math.pi / 6, # Gentle Kuramoto-Sakaguchi frustration
         )
 
     @staticmethod
@@ -259,6 +274,7 @@ class CycleConfig:
                 'inter_density': 0.1,
             },
             oscillator_frustration=math.pi / 4,  # Kuramoto-Sakaguchi α — promotes chimera states
+            num_contrarian_oscillators=2,         # Built-in skeptic modules (Hong & Strogatz 2011)
             use_theta_gamma_pac=True,
             theta_oscillators=8,
             target_metastability=0.0,  # auto-scale via 1/sqrt(N)

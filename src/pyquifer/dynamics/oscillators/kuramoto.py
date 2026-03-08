@@ -8,7 +8,7 @@ This module contains the core Kuramoto-family oscillator implementations:
 - SensoryCoupling: Biologically-motivated sensory-to-oscillator coupling
 """
 import math
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -91,7 +91,8 @@ class LearnableKuramotoBank(nn.Module):
                  topology_params: Optional[dict] = None,
                  integration_method: Literal['euler', 'rk4'] = 'euler',
                  learnable_coupling_matrix: bool = False,
-                 frustration: float = 0.0):
+                 frustration: float = 0.0,
+                 contrarian_indices: Optional[List[int]] = None):
         """
         Args:
             num_oscillators: Number of oscillators in the bank.
@@ -124,6 +125,11 @@ class LearnableKuramotoBank(nn.Module):
                 promotes metastable chimera states in modular networks.
                 (Frontiers in Network Physiology 2024; Sakaguchi & Kuramoto 1986)
                 Default 0.0 recovers standard Kuramoto.
+            contrarian_indices: List of oscillator indices that use negative coupling
+                (σ_i = -1). Contrarians settle at π anti-phase from the mean field,
+                preventing full mode collapse and sustaining chimera dynamics.
+                (Hong & Strogatz 2011, PRL; Sethia & Sen 2014 PRL)
+                Default None (all conformists — standard Kuramoto behavior).
         """
         super().__init__()
         self.num_oscillators = num_oscillators
@@ -181,6 +187,17 @@ class LearnableKuramotoBank(nn.Module):
 
         # Initialize adjacency matrix based on topology
         self._init_adjacency(topology, self.topology_params)
+
+        # Per-oscillator coupling sign: +1 (conformist) or -1 (contrarian).
+        # Contrarians couple negatively to the mean field, settling at π anti-phase.
+        # This prevents full phase-locking and sustains chimera dynamics.
+        # (Hong & Strogatz 2011, PRL 106 054102)
+        _signs = torch.ones(num_oscillators)
+        if contrarian_indices:
+            for idx in contrarian_indices:
+                if 0 <= idx < num_oscillators:
+                    _signs[idx] = -1.0
+        self.register_buffer('_coupling_signs', _signs)
 
         # Per-connection learnable coupling weights (for EP training)
         if learnable_coupling_matrix:
@@ -628,14 +645,16 @@ class LearnableKuramotoBank(nn.Module):
                             is_ = torch.sum(wi, dim=1)
                             cc = ea.abs().sum(dim=1).clamp(min=1)
                             ni = is_ / cc
-                    rhs = self.natural_frequencies + self.coupling_strength * ni
+                    rhs = (self.natural_frequencies
+                           + self.coupling_strength * self._coupling_signs * ni)
                     if _ext is not None:
                         rhs = rhs + _ext
                     return rhs
 
                 phases = _rk4_step(_kuramoto_rhs, phases, self.dt) % (2 * math.pi)
             else:
-                d_theta_dt = self.natural_frequencies + self.coupling_strength * normalized_interaction
+                d_theta_dt = (self.natural_frequencies
+                              + self.coupling_strength * self._coupling_signs * normalized_interaction)
                 if external_input is not None:
                     d_theta_dt = d_theta_dt + external_input
                 phases = (phases + d_theta_dt * self.dt) % (2 * math.pi)

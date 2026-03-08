@@ -138,6 +138,24 @@ class ModulationState:
     energy_budget: float = 1.0     # Remaining metabolic budget [0, 1]
     energy_ratio: float = 1.0      # energy_budget / metabolic_capacity
 
+    # === Integration quality ===
+    # Daido synergy r₂ - r₁²: >0 = genuine multi-group integration,
+    # ~0 = echo chamber (all oscillators phase-locked together).
+    synergy: float = 0.0
+    # Per-module metrics (modular topology only; 0.0 for global/other topologies).
+    # module_R_variance: var(R_m across modules) — chimera indicator.
+    #   High = modules differ in synchrony (partial lock across sub-populations).
+    #   Low  = all modules equally synchronised or equally fragmented.
+    # module_synergy: mean within-module Daido synergy — per-cluster integration.
+    module_R_variance: float = 0.0
+    module_synergy: float = 0.0
+    # Continuous perception weight: sigmoid((R - 0.50) / 0.15).
+    # 1.0 = pure perception (grounded, high coherence).
+    # 0.0 = pure imagination (associative, low coherence).
+    # 0.5 = balanced. Parallel to categorical processing_mode string —
+    # use this for smooth behavioral blending rather than hard mode switches.
+    perception_weight: float = 0.5
+
     # === Latency ===
     step_latency_ms: float = 0.0
 
@@ -475,6 +493,10 @@ class PyQuiferBridge(nn.Module):
                 gating_stn_active=d.get('bg_stn_active', False),
                 energy_budget=float(d.get('metabolic', {}).get('energy_budget', 1.0)),
                 energy_ratio=float(d.get('metabolic', {}).get('energy_ratio', 1.0)),
+                synergy=float(c.get('synergy', 0.0)),
+                module_R_variance=float(c.get('module_R_variance', 0.0)),
+                module_synergy=float(c.get('module_synergy', 0.0)),
+                perception_weight=float(c.get('perception_weight', 0.5)),
                 step_latency_ms=latency_ms,
             )
             self._last_diagnostics = {
@@ -527,6 +549,10 @@ class PyQuiferBridge(nn.Module):
                 neuromodulator_levels=self.cycle.neuromodulation.levels.detach(),
                 workspace_winner_id=self.cycle._cached_gw_winner_id or None,
                 workspace_broadcast=self.cycle._cached_gw_broadcast,
+                synergy=self.cycle._cached_synergy.item(),
+                module_R_variance=self.cycle._cached_module_R_var.item(),
+                module_synergy=self.cycle._cached_module_synergy.item(),
+                perception_weight=self.cycle._cached_perception_weight.item(),
                 step_latency_ms=latency_ms,
             )
 

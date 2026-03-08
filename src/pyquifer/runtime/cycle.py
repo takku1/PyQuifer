@@ -78,6 +78,16 @@ class CognitiveCycle(nn.Module):
         self.register_buffer('_cached_metastability', torch.tensor(0.0))
         self.register_buffer('_cached_dephasing_gain', torch.tensor(1.5))
         self.register_buffer('_R_target', torch.tensor(c.target_R))
+        # Daido synergy: r₂ - r₁² (genuine integration vs. groupthink)
+        self.register_buffer('_cached_synergy', torch.tensor(0.0))
+        # Per-module metrics (modular topology only; 0.0 for global topology).
+        self.register_buffer('_cached_module_R_var', torch.tensor(0.0))
+        self.register_buffer('_cached_module_synergy', torch.tensor(0.0))
+        # Continuous perception weight: sigmoid((R - 0.50) / 0.15).
+        # 1.0 = pure perception (high coherence, grounded), 0.0 = pure imagination
+        # (low coherence, associative). Parallel to the categorical processing_mode
+        # string — consumers that want smooth blending use this instead.
+        self.register_buffer('_cached_perception_weight', torch.tensor(0.5))
 
         # ── Long R history for neuroscience diagnostics (DFA, spectral, etc.) ──
         # Separate from the 50-sample buffer used for SD(R) — that one is tuned.
@@ -137,8 +147,16 @@ class CognitiveCycle(nn.Module):
         # ── Fix 10: Consciousness quality metric Φ_m ──
         self.register_buffer('_cached_phi_m', torch.tensor(0.0))
 
+        # ── Surprise-detection free-energy EMA (must be buffers to survive save/load) ──
+        self.register_buffer('_fe_ema', torch.tensor(0.0))
+        self.register_buffer('_fe_var_ema', torch.tensor(0.001))
+
         # === Layer 3: Dynamical Core ===
         from pyquifer.dynamics.oscillators.kuramoto import LearnableKuramotoBank, SensoryCoupling
+        _contrarian_idx = (
+            list(range(c.num_contrarian_oscillators))
+            if c.num_contrarian_oscillators > 0 else None
+        )
         self.oscillators = LearnableKuramotoBank(
             num_oscillators=c.num_oscillators,
             dt=c.oscillator_dt,
@@ -146,6 +164,7 @@ class CognitiveCycle(nn.Module):
             topology=c.oscillator_topology,
             topology_params=c.oscillator_topology_params,
             frustration=c.oscillator_frustration,
+            contrarian_indices=_contrarian_idx,
         )
 
         # ── Fix 11: Theta-gamma frequency band assignment ──
@@ -931,6 +950,49 @@ class CognitiveCycle(nn.Module):
         # get_order_parameter() always returns a tensor
         coherence = order_param
 
+        # ── Step 1a: Daido synergy metric ──
+        # r₂ - r₁²: positive when oscillators cluster in distinct sub-groups
+        # (genuine integration). Near-zero when all phase-locked (echo chamber).
+        # Requires individual phases — degenerate in mean-field (Ott-Antonsen ansatz).
+        with torch.no_grad():
+            _phases_c = phases.to(torch.complex64)
+            _z1 = torch.exp(1j * _phases_c).mean()
+            _z2 = torch.exp(2j * _phases_c).mean()
+            _r2 = _z2.abs()
+            _synergy = (_r2 - coherence.detach() ** 2).clamp(-1.0, 1.0)
+            self._cached_synergy.copy_(_synergy)
+
+            # ── Synergy → _R_target: smooth tanh proportional controller ──
+            # Replaces piecewise if/then thresholds with a continuous mapping.
+            # tanh(_synergy / τ) with τ=0.06 gives:
+            #   synergy = -0.08 → delta ≈ -0.0017 (was -0.002 from if branch)
+            #   synergy =  0.00 → delta =  0.000  (neutral)
+            #   synergy = +0.05 → delta ≈ +0.0011 (was +0.001 from elif branch)
+            # Scale 0.002 keeps magnitude identical to original piecewise version.
+            _delta_R = 0.002 * torch.tanh(_synergy / 0.06)
+            self._R_target.add_(_delta_R).clamp_(min=0.35, max=self.config.target_R)
+
+            # ── Per-module synergy (when modular topology) ──
+            # get_module_order_parameters() returns R per module, or None for
+            # non-modular topologies (global, small_world, etc.).
+            # Per-module synergy r2_m - r1_m^2 captures within-module integration,
+            # and var(R_modules) is a chimera indicator (Crowe et al. 2024).
+            _module_Rs = self.oscillators.get_module_order_parameters()
+            if _module_Rs is not None and hasattr(self.oscillators, '_module_boundaries'):
+                _mod_syns = []
+                for _ms, _me in self.oscillators._module_boundaries:
+                    _ph_m = _phases_c[_ms:_me]
+                    _z1_m = torch.exp(1j * _ph_m).mean()
+                    _z2_m = torch.exp(2j * _ph_m).mean()
+                    _mod_syns.append((_z2_m.abs() - _z1_m.abs() ** 2).clamp(-1.0, 1.0))
+                _module_syn_mean = torch.stack(_mod_syns).mean()
+                _module_R_var    = _module_Rs.var()
+            else:
+                _module_syn_mean = _synergy
+                _module_R_var    = torch.zeros(1)[0]
+            self._cached_module_R_var.copy_(_module_R_var)
+            self._cached_module_synergy.copy_(_module_syn_mean)
+
         # ── Step 1a2: Complex oscillator backend (parallel to real-valued) ──
         complex_osc_info = {}
         if self._complex_oscillators is not None:
@@ -1231,18 +1293,20 @@ class CognitiveCycle(nn.Module):
         # NOTE: Applied AFTER criticality feedback (step 2) so the homeostatic
         # controller doesn't immediately undo the desynchronization.
         fe_val = float(free_energy) if isinstance(free_energy, torch.Tensor) else free_energy
-        if not hasattr(self, '_fe_ema'):
-            self._fe_ema = fe_val
-            self._fe_var_ema = 0.001
-        else:
-            fe_alpha = 0.05
-            self._fe_var_ema = (1 - fe_alpha) * self._fe_var_ema + fe_alpha * (fe_val - self._fe_ema) ** 2
-            self._fe_ema = (1 - fe_alpha) * self._fe_ema + fe_alpha * fe_val
+        fe_alpha = 0.05
+        with torch.no_grad():
+            if self._tick_py == 0:
+                self._fe_ema.fill_(fe_val)
+            else:
+                old_mean = self._fe_ema.item()
+                new_var = (1 - fe_alpha) * self._fe_var_ema.item() + fe_alpha * (fe_val - old_mean) ** 2
+                self._fe_ema.fill_((1 - fe_alpha) * old_mean + fe_alpha * fe_val)
+                self._fe_var_ema.fill_(new_var)
 
-        fe_sigma = math.sqrt(max(1e-6, self._fe_var_ema))
-        surprise_threshold = self._fe_ema + fe_sigma
+        fe_sigma = math.sqrt(max(1e-6, self._fe_var_ema.item()))
+        surprise_threshold = self._fe_ema.item() + fe_sigma
         if fe_val > surprise_threshold and self._tick_py > 10:
-            z_score = (fe_val - self._fe_ema) / fe_sigma
+            z_score = (fe_val - self._fe_ema.item()) / fe_sigma
             # Noise scales with z-score: 1σ→0.2rad, 2σ→0.4rad, 3σ+→0.6rad cap
             noise_magnitude = min(0.6, z_score * 0.2)
             with torch.no_grad():
@@ -1310,6 +1374,13 @@ class CognitiveCycle(nn.Module):
             processing_mode = 'perception'
         elif R_val < 0.2:
             processing_mode = 'imagination'
+
+        # Continuous perception weight — parallel to categorical mode above.
+        # sigmoid((R - 0.50) / 0.15): smooth monotone mapping from coherence to [0,1].
+        # Does NOT override the categorical string (backward compat preserved).
+        with torch.no_grad():
+            _pw = torch.sigmoid((coherence.detach() - 0.50) / 0.15)
+            self._cached_perception_weight.copy_(_pw)
 
         # ── Step 8: Metastability (stream of consciousness) ──
         if self._tick_py % c.step_every_metastability == 0 or self._cached_meta is None:
@@ -2073,6 +2144,14 @@ class CognitiveCycle(nn.Module):
                 'dominance_ratio': _dom_ratio,
                 'processing_mode': processing_mode,
                 'metastability_sd_R': self._cached_metastability.item(),
+                'synergy': self._cached_synergy.item(),
+                # Per-module metrics (non-None only for modular topology).
+                # module_R_variance is a chimera indicator: high = modules differ
+                # in synchrony level (partial lock across sub-populations).
+                # module_synergy is the within-module integration quality.
+                'module_R_variance': _module_R_var.item() if hasattr(_module_R_var, 'item') else float(_module_R_var),
+                'module_synergy': _module_syn_mean.item() if hasattr(_module_syn_mean, 'item') else float(_module_syn_mean),
+                'perception_weight': self._cached_perception_weight.item(),
                 'effective_target_meta': self._effective_target_meta,
                 'dephasing_gain': self._cached_dephasing_gain.item(),
                 'meta_r_coupling': self._cached_pac_strength.item(),  # R-oscillation coupling (legacy name: pac_strength)

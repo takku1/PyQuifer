@@ -52,6 +52,9 @@ Thumbs.db
 .env
 .env.local
 
+# Hypothesis test database
+.hypothesis/
+
 # Third-party benchmark repos (cloned for comparison, not ours)
 tests/benchmarks/alphagenome/
 tests/benchmarks/arXiv-*/
