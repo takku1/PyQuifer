@@ -1046,15 +1046,29 @@ class SensoryCoupling(nn.Module):
             (novelty - self.phase_reset_threshold) * 3.0
         )
 
-        # Target phases derived from input content
-        phase_targets = (self.phase_projection @ x) % (2 * math.pi)
+        # Target phases derived from input content.
+        # Bug fix: the raw projection (phase_proj @ x) has std ≈ ||x||/sqrt(input_dim) ≈ 0.5–0.7
+        # which is << 2π = 6.28.  All 32 targets cluster near 0 → phase reset drives R→1.
+        # Fix: normalize raw projection to std ≈ 1.09 rad.  For Gaussian phases,
+        # R ≈ exp(-σ²/2), so σ=1.09 → R≈0.55 after a full phase reset — midpoint of
+        # the metastable chimera band [0.35, 0.65].  Resets now desynchronize rather than
+        # synchronize, while leaving room for the Kuramoto dynamics to build partial coherence.
+        _raw_targets = self.phase_projection @ x
+        _sigma = _raw_targets.std().clamp(min=1e-4)
+        _target_std = 1.09  # σ → R≈0.55 after reset (metastable target)
+        phase_targets = (_raw_targets * (_target_std / _sigma)) % (2 * math.pi)
 
         # ── 3. Coupling modulation from input energy ──
-        # Normalized energy: ~1.0 for typical input, >1 for strong
+        # Normalized energy: ~1.0 for unit-norm input.  Structured sensory vectors
+        # (emotion + traits + noise) typically land at energy ≈ 0.5–0.7, which with the
+        # original `sigmoid(energy - 1.0)` gave coupling_scale ≈ 0.97 every tick →
+        # systematic K decay toward the 0.1 floor, blocking synchrony build-up.
+        # Fix: shift neutral point to energy = 0.5 (`sigmoid(energy - 0.5)`), so typical
+        # input gives coupling_scale ≈ 1.0 (neutral), preserving K stability.
         energy = x.norm() / (in_dim ** 0.5 + 1e-8)
         coupling_scale = self.coupling_mod_lo + (
             self.coupling_mod_hi - self.coupling_mod_lo
-        ) * torch.sigmoid(energy - 1.0)
+        ) * torch.sigmoid(energy - 0.5)
 
         return {
             'freq_modulation': freq_mod,

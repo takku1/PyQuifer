@@ -1137,6 +1137,16 @@ class CognitiveCycle(nn.Module):
                 colored_noise=_colored,
             )
 
+            # Update coherence to reflect post-dephasing state (actual system state).
+            # Previously coherence was read BEFORE criticality feedback, giving an
+            # inflated R (0.85+) while the true post-dephasing R was 0.3–0.6.
+            # Using the dephased phases ensures downstream consumers (brain._build_sensory_input,
+            # TUI bars, ModulationState.coherence) see the actual metastable oscillator state.
+            with torch.no_grad():
+                _cos_d = torch.cos(self.oscillators.phases).mean()
+                _sin_d = torch.sin(self.oscillators.phases).mean()
+                coherence = (_cos_d ** 2 + _sin_d ** 2).sqrt()
+
         # ── Step 2b: Optional Koopman bifurcation detection ──
         koopman_info = {}
         _koopman_result = None
