@@ -149,9 +149,19 @@ class LearnableKuramotoBank(nn.Module):
         )
 
         # Learnable global coupling strength.
-        # Default 0.35 ≈ K_c + small margin for σ(ω)~0.3 frequencies,
-        # so the system starts in the chimera band without a long burn-in.
-        self.coupling_strength = nn.Parameter(torch.tensor(float(initial_coupling)))
+        # If initial_coupling is None, derive K from the Kuramoto synchronization
+        # threshold: K_c = 2σ(ω)/π  (Kuramoto 1984, exact for Lorentzian g(ω);
+        # good approximation for uniform).  We start at K_c * 1.5 — above the
+        # transition so partial synchronization exists immediately, but below the
+        # over-synchronized regime (K >> K_c → R→1).  The criticality feedback
+        # controller in CognitiveCycle then steers K toward the chimera band online.
+        if initial_coupling is None:
+            omega_std = self.natural_frequencies.std().item()
+            K_c = (2.0 * omega_std) / math.pi      # Kuramoto critical coupling
+            _K_init = K_c * 1.5                     # start 50% above transition
+        else:
+            _K_init = float(initial_coupling)
+        self.coupling_strength = nn.Parameter(torch.tensor(_K_init))
 
         # Oscillator phases (state evolved by Kuramoto dynamics, not backprop)
         if phase_init == 'von_mises':
