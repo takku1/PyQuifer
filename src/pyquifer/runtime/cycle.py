@@ -165,6 +165,7 @@ class CognitiveCycle(nn.Module):
             topology_params=c.oscillator_topology_params,
             frustration=c.oscillator_frustration,
             contrarian_indices=_contrarian_idx,
+            initial_coupling=c.oscillator_initial_coupling,
         )
 
         # ── Fix 11: Theta-gamma frequency band assignment ──

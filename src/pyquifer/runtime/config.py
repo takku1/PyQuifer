@@ -21,6 +21,10 @@ class CycleConfig:
     # Oscillator settings
     num_oscillators: int = 32
     oscillator_dt: float = 0.01
+    # Initial coupling K — set near K_c = 2σ(ω)/π ≈ 0.20 for default frequencies.
+    # K=0.35 starts just above K_c: system enters chimera band quickly without
+    # waiting hundreds of ticks for the criticality controller to drag K down from 1.0.
+    oscillator_initial_coupling: float = 0.35
 
     # Hierarchy levels (bottom to top)
     hierarchy_dims: List[int] = field(default_factory=lambda: [64, 32, 16])

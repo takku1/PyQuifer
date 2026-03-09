@@ -92,7 +92,8 @@ class LearnableKuramotoBank(nn.Module):
                  integration_method: Literal['euler', 'rk4'] = 'euler',
                  learnable_coupling_matrix: bool = False,
                  frustration: float = 0.0,
-                 contrarian_indices: Optional[List[int]] = None):
+                 contrarian_indices: Optional[List[int]] = None,
+                 initial_coupling: float = 0.35):
         """
         Args:
             num_oscillators: Number of oscillators in the bank.
@@ -147,8 +148,10 @@ class LearnableKuramotoBank(nn.Module):
             + initial_frequency_range[0]
         )
 
-        # Learnable global coupling strength
-        self.coupling_strength = nn.Parameter(torch.tensor(1.0))
+        # Learnable global coupling strength.
+        # Default 0.35 ≈ K_c + small margin for σ(ω)~0.3 frequencies,
+        # so the system starts in the chimera band without a long burn-in.
+        self.coupling_strength = nn.Parameter(torch.tensor(float(initial_coupling)))
 
         # Oscillator phases (state evolved by Kuramoto dynamics, not backprop)
         if phase_init == 'von_mises':
