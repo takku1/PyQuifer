@@ -19,6 +19,8 @@ from pyquifer.runtime.config import CycleConfig
 from pyquifer.runtime.cycle import CognitiveCycle
 from pyquifer.diagnostics import neuroscience as nd
 
+pytestmark = pytest.mark.slow
+
 # Number of ticks to establish regime statistics
 WARMUP_TICKS = 200
 MEASUREMENT_TICKS = 400
