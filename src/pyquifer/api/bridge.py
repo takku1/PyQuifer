@@ -149,6 +149,15 @@ class ModulationState:
     # module_synergy: mean within-module Daido synergy — per-cluster integration.
     module_R_variance: float = 0.0
     module_synergy: float = 0.0
+    # Cluster structure metrics (from 8-bin phase histogram, post-dephasing).
+    # cluster_count: number of bins with >8% occupancy (0–8).
+    #   High = oscillators distributed across multiple sub-groups (complex state).
+    #   Low  = oscillators concentrated in few phase-clusters (simple/locked state).
+    # cluster_entropy: normalized Shannon entropy of the histogram [0,1].
+    #   1 = maximally even distribution across bins (diverse, complex).
+    #   0 = all oscillators in one bin (fully phase-locked, simple).
+    cluster_count: int = 0
+    cluster_entropy: float = 0.5
     # Continuous perception weight: sigmoid((R - 0.50) / 0.15).
     # 1.0 = pure perception (grounded, high coherence).
     # 0.0 = pure imagination (associative, low coherence).
@@ -496,6 +505,8 @@ class PyQuiferBridge(nn.Module):
                 synergy=float(c.get('synergy', 0.0)),
                 module_R_variance=float(c.get('module_R_variance', 0.0)),
                 module_synergy=float(c.get('module_synergy', 0.0)),
+                cluster_count=int(c.get('cluster_count', 0)),
+                cluster_entropy=float(c.get('cluster_entropy', 0.5)),
                 perception_weight=float(c.get('perception_weight', 0.5)),
                 step_latency_ms=latency_ms,
             )
@@ -552,6 +563,8 @@ class PyQuiferBridge(nn.Module):
                 synergy=self.cycle._cached_synergy.item(),
                 module_R_variance=self.cycle._cached_module_R_var.item(),
                 module_synergy=self.cycle._cached_module_synergy.item(),
+                cluster_count=int(self.cycle._cached_cluster_count.item()),
+                cluster_entropy=float(self.cycle._cached_cluster_entropy.item()),
                 perception_weight=self.cycle._cached_perception_weight.item(),
                 step_latency_ms=latency_ms,
             )

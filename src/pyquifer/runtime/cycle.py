@@ -83,6 +83,12 @@ class CognitiveCycle(nn.Module):
         # Per-module metrics (modular topology only; 0.0 for global topology).
         self.register_buffer('_cached_module_R_var', torch.tensor(0.0))
         self.register_buffer('_cached_module_synergy', torch.tensor(0.0))
+        # Cluster structure: how oscillators distribute across phase space.
+        # _cached_cluster_count: number of 8 phase-bins occupied by >8% of oscillators (0–8).
+        # _cached_cluster_entropy: normalized Shannon entropy of the 8-bin histogram [0,1];
+        #   1 = maximally even distribution (complex), 0 = all in one bin (simple/locked).
+        self.register_buffer('_cached_cluster_count', torch.tensor(0.0))
+        self.register_buffer('_cached_cluster_entropy', torch.tensor(0.5))
         # Continuous perception weight: sigmoid((R - 0.50) / 0.15).
         # 1.0 = pure perception (high coherence, grounded), 0.0 = pure imagination
         # (low coherence, associative). Parallel to the categorical processing_mode
@@ -1147,6 +1153,22 @@ class CognitiveCycle(nn.Module):
                 _sin_d = torch.sin(self.oscillators.phases).mean()
                 coherence = (_cos_d ** 2 + _sin_d ** 2).sqrt()
 
+            # Compute cluster entropy from post-dephasing phases.
+            # Uses 8-bin histogram; entropy measures how evenly distributed oscillators are
+            # across phase space. High entropy = many small clusters (complex state).
+            # Low entropy = oscillators concentrated in few bins (simple/locked state).
+            with torch.no_grad():
+                _phases_curr = self.oscillators.phases
+                _n_osc = _phases_curr.shape[0]
+                _bin_size = 2 * math.pi / 8
+                _bin_idx = (_phases_curr / _bin_size).long().clamp(0, 7)
+                _hist = torch.bincount(_bin_idx, minlength=8).float()
+                _n_clusters = float((_hist > (_n_osc * 0.08)).sum().item())
+                _p = _hist / _n_osc + 1e-8
+                _cluster_entropy = float(-(_p * torch.log(_p)).sum().item() / math.log(8))
+                self._cached_cluster_count.fill_(_n_clusters)
+                self._cached_cluster_entropy.fill_(max(0.0, min(1.0, _cluster_entropy)))
+
         # ── Step 2b: Optional Koopman bifurcation detection ──
         koopman_info = {}
         _koopman_result = None
@@ -2162,6 +2184,9 @@ class CognitiveCycle(nn.Module):
                 # module_synergy is the within-module integration quality.
                 'module_R_variance': _module_R_var.item() if hasattr(_module_R_var, 'item') else float(_module_R_var),
                 'module_synergy': _module_syn_mean.item() if hasattr(_module_syn_mean, 'item') else float(_module_syn_mean),
+                # Cluster structure metrics (from 8-bin phase histogram, post-dephasing).
+                'cluster_count': int(self._cached_cluster_count.item()),
+                'cluster_entropy': float(self._cached_cluster_entropy.item()),
                 'perception_weight': self._cached_perception_weight.item(),
                 'effective_target_meta': self._effective_target_meta,
                 'dephasing_gain': self._cached_dephasing_gain.item(),
